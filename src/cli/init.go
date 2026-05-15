@@ -36,7 +36,7 @@ func runInitWizard(dir string) {
 	a.description = ui.AskDefault("Description", "A custom Fedora-based OS")
 	a.author      = ui.AskDefault("Author", "")
 
-	desktops := []string{"gnome", "kde", "xfce", "cinnamon", "mate", "lxqt", "none"}
+	desktops := []string{"gnome", "kde", "xfce", "cinnamon", "mate", "lxqt", "cosmic", "none"}
 	idx := ui.AskChoice("Desktop environment", desktops, 0)
 	a.desktop = desktops[idx]
 
@@ -78,6 +78,9 @@ func scaffold(dir string, a *initAnswers) {
 		paths.FilesAfter + "/usr/local/bin",
 		paths.FilesBefore + "/etc",
 		paths.ScriptsDir,
+		paths.ScriptsPre,
+		paths.ScriptsBefore,
+		paths.ScriptsAfter,
 		paths.ReposDir,
 		paths.BuildDir,
 		paths.CacheDir,
@@ -112,12 +115,22 @@ func scaffold(dir string, a *initAnswers) {
 	ui.OK("remove.packages")
 
 	bar.Set(len(dirs) + 4)
-	write(filepath.Join(paths.ScriptsDir, "00-example.sh"), exampleScript)
-	ui.OK("scripts/00-example.sh")
+	write(filepath.Join(paths.ScriptsBefore, "00-example.sh"), exampleScriptBefore)
+	ui.OK("scripts/before/00-example.sh")
+
+	bar.Set(len(dirs) + 5)
+	write(filepath.Join(paths.ScriptsAfter, "00-example.sh"), exampleScriptAfter)
+	ui.OK("scripts/after/00-example.sh")
 
 	bar.Set(len(dirs) + 5)
 	write(filepath.Join(paths.ReposDir, "example.repo"), exampleRepo)
 	ui.OK("repos/example.repo")
+
+	// Auto-generate cosmic.repo if COSMIC desktop was selected
+	if a.desktop == "cosmic" {
+		write(filepath.Join(paths.ReposDir, "cosmic.repo"), cosmicRepo)
+		ui.OK("repos/cosmic.repo  (COSMIC desktop repo)")
+	}
 
 	bar.Set(len(dirs) + 6)
 	write(filepath.Join(dir, ".gitignore"), gitignore)
@@ -133,10 +146,10 @@ func scaffold(dir string, a *initAnswers) {
 	fmt.Fprintln(ui.Out)
 	ui.Section("Next steps")
 	ui.Info("1. Edit config.toml")
-	ui.Info("2. Add packages to install.packages")
+	ui.Info("2. Add packages to packages/install.packages")
 	ui.Info("3. Drop .rpm files into packages/")
 	ui.Info("4. Add files to files/after/ and files/before/")
-	ui.Info("5. Add hooks to scripts/")
+	ui.Info("5. Add hooks to scripts/before/ and scripts/after/")
 	ui.Info("6. legendaryos build cloud")
 	ui.Info("7. legendaryos build iso")
 	fmt.Fprintln(ui.Out)
@@ -150,13 +163,17 @@ func printTree(dir string) {
 	lines := []string{
 		fmt.Sprintf("  %s/", base),
 		"  ├── config.toml            ← main configuration",
-		"  ├── install.packages       ← packages to install",
-		"  ├── remove.packages        ← packages to remove",
-		"  ├── packages/              ← local .rpm files",
+		"  ├── packages/",
+		"  │   ├── install.packages   ← packages to install",
+		"  │   ├── remove.packages    ← packages to remove",
+		"  │   └── *.rpm              ← local RPM files (optional)",
 		"  ├── files/",
 		"  │   ├── before/            ← overlay BEFORE package install",
 		"  │   └── after/             ← overlay AFTER package install",
-		"  ├── scripts/               ← hooks (.sh .py .pl .rb)",
+		"  ├── scripts/",
+		"  │   ├── pre/               ← run on HOST before any build step",
+		"  │   ├── before/            ← run inside container BEFORE dnf install",
+		"  │   └── after/             ← run inside container AFTER dnf install",
 		"  ├── repos/                 ← custom .repo files",
 		"  ├── .github/workflows/",
 		"  │   └── build-cloud.yml    ← GitHub Actions CI",
@@ -276,7 +293,7 @@ bootc_mode = true
 
 func renderInstallPackages(a *initAnswers) string {
 	var sb strings.Builder
-	sb.WriteString("# install.packages — one package per line\n")
+	sb.WriteString("# packages/install.packages — one package per line\n")
 	sb.WriteString("# Comments start with #\n")
 	sb.WriteString("# Groups: prefix with @  e.g. @base-x\n\n")
 	sb.WriteString("# ── Base tools ───────────────────────────────────────────────────\n")
@@ -284,14 +301,46 @@ func renderInstallPackages(a *initAnswers) string {
 		sb.WriteString(p + "\n")
 	}
 	if a.desktop != "none" && a.desktop != "" {
-		sb.WriteString(fmt.Sprintf("\n# ── %s Desktop ──────────────────────────────────────────────────\n",
-			strings.Title(a.desktop)))
-		sb.WriteString(fmt.Sprintf("@%s-desktop-environment\n", a.desktop))
+		switch a.desktop {
+		case "cosmic":
+			// COSMIC desktop from System76 — no DNF group, individual packages
+			// Requires repos/cosmic.repo (COPR: nickel-org/cosmic-desktop)
+			sb.WriteString("\n# ── COSMIC Desktop (System76) ──────────────────────────────────\n")
+			sb.WriteString("# Requires repos/cosmic.repo — see notes below\n")
+			for _, p := range []string{
+				"cosmic-session",        // Wayland compositor + session manager
+				"cosmic-settings",       // System settings app
+				"cosmic-files",          // File manager
+				"cosmic-terminal",       // Terminal emulator
+				"cosmic-launcher",       // App launcher
+				"cosmic-panel",          // Top panel
+				"cosmic-dock",           // Bottom dock
+				"cosmic-applets",        // Panel applets (network, battery, etc.)
+				"cosmic-bg",             // Wallpaper manager
+				"cosmic-notifications",  // Notification daemon
+				"cosmic-screenshot",     // Screenshot tool
+				"cosmic-edit",           // Text editor
+				"cosmic-store",          // App store (Flatpak frontend)
+				"cosmic-greeter",        // Login screen (greeter)
+				"xdg-user-dirs",
+				"pipewire",
+				"pipewire-alsa",
+				"pipewire-pulseaudio",
+				"wireplumber",
+			} {
+				sb.WriteString(p + "\n")
+			}
+		default:
+			// Standard Fedora desktop groups: @gnome-desktop-environment, @kde-desktop-environment etc.
+			sb.WriteString(fmt.Sprintf("\n# ── %s Desktop ──────────────────────────────────────────────────\n",
+				strings.Title(a.desktop)))
+			sb.WriteString(fmt.Sprintf("@%s-desktop-environment\n", a.desktop))
+		}
 	}
 	return sb.String()
 }
 
-var defaultRemovePkgs = `# remove.packages — packages to remove after install
+var defaultRemovePkgs = `# packages/remove.packages — packages to remove after install
 # One per line, # = comment
 
 # Slim down the image:
@@ -299,26 +348,49 @@ var defaultRemovePkgs = `# remove.packages — packages to remove after install
 # gedit
 `
 
-var exampleScript = `#!/usr/bin/env bash
-# scripts/00-example.sh — runs inside the container during build
-# Naming convention: NN-name.sh  (sorted alphabetically / numerically)
-#
-# Available env vars:
-#   LEGENDARYOS_PROJECT  — project name from config.toml
-#   LEGENDARYOS_VERSION  — version
-#   LEGENDARYOS_BUILD    — path to build/ dir (on the host, not container)
-
+var exampleScriptBefore = `#!/usr/bin/env bash
+# scripts/before/00-example.sh
+# Runs BEFORE package installation.
+# Use for: adding custom repos, pre-seeding config, setting up keys.
 set -euo pipefail
 
-echo "==> LegendaryOS hook: ${0##*/}"
+echo "==> LegendaryOS [before] hook: ${0##*/}"
+
+# Example: import a GPG key before dnf install
+# rpm --import https://example.com/RPM-GPG-KEY-myrepo
+`
+
+var exampleScriptAfter = `#!/usr/bin/env bash
+# scripts/after/00-example.sh
+# Runs AFTER package installation.
+# Use for: system config, enabling services, sysctl tweaks, Flatpak remotes.
+set -euo pipefail
+
+echo "==> LegendaryOS [after] hook: ${0##*/}"
 echo "    Project : ${LEGENDARYOS_PROJECT:-unknown}"
 echo "    Version : ${LEGENDARYOS_VERSION:-unknown}"
 
-# Example: set a sysctl
-# echo "vm.swappiness=10" > /etc/sysctl.d/99-custom.conf
-
-# Example: enable a systemd unit
+# Example: enable a systemd service
 # systemctl enable my-service.service
+
+# Example: add Flathub remote
+# flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+`
+
+var cosmicRepo = `# repos/cosmic.repo
+# COSMIC Desktop — System76
+# COPR: nickel-org/cosmic-desktop (community port for Fedora)
+# Oficjalne repozytorium COSMIC na Fedorę via COPR
+
+[copr:copr.fedorainfracloud.org:nickel-org:cosmic-desktop]
+name=COSMIC Desktop (Fedora $releasever)
+baseurl=https://download.copr.fedorainfracloud.org/results/nickel-org/cosmic-desktop/fedora-$releasever-x86_64/
+type=rpm-md
+enabled=1
+gpgcheck=1
+gpgkey=https://download.copr.fedorainfracloud.org/results/nickel-org/cosmic-desktop/pubkey.gpg
+repo_gpgcheck=0
+priority=80
 `
 
 var exampleRepo = `# repos/example.repo
@@ -339,8 +411,13 @@ build/work/
 build/iso-work/
 build/rootfs/
 build/context/
+build/podman-storage/
 *.iso
 *.img
+config.toml.bak
+
+# Personal credentials — NEVER commit this
+user.toml
 `
 
 func renderGHAWorkflow(a *initAnswers) string {
@@ -434,7 +511,7 @@ func renderGHAWorkflow(a *initAnswers) string {
 	w("")
 	w("      # ── Build container image ─────────────────────────────────────────")
 	w("      # legendaryos build cloud does:")
-	w("      #   1. Reads config.toml + install.packages + files/ + scripts/ + repos/")
+	w("      #   1. Reads config.toml + packages/install.packages + files/ + scripts/ + repos/")
 	w("      #   2. Generates build/Containerfile")
 	w("      #   3. Runs: podman build --tag <image> --file build/Containerfile .")
 	w("      #   4. (if --push) Runs: podman push <image>")
