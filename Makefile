@@ -1,5 +1,4 @@
-BINARY      := legendaryos
-MODULE      := github.com/legendaryos/builder
+BINARY      := legendaryos-builder
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo "v1.0.0")
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE  := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -20,7 +19,7 @@ build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) .
 	@printf "  \033[92m✓\033[0m  $(BINARY) ready\n"
 
-# ── Release build — linux/amd64 only ─────────────────────────────────────────
+# ── Release build — linux/amd64 ───────────────────────────────────────────────
 release: fmt vet
 	@printf "  \033[96m⬡\033[0m  Building release binary (linux/amd64) ...\n"
 	@mkdir -p $(DIST_DIR)
@@ -37,7 +36,6 @@ install: build
 	@sudo install -m 0755 $(BINARY) /usr/local/bin/$(BINARY)
 	@printf "  \033[92m✓\033[0m  Installed\n"
 
-# ── Code quality ──────────────────────────────────────────────────────────────
 fmt:
 	go fmt ./...
 
@@ -50,23 +48,20 @@ tidy:
 test:
 	go test ./... -v -count=1
 
-# ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
 	@printf "  \033[96m⬡\033[0m  Cleaning ...\n"
 	@rm -f $(BINARY)
 	@rm -rf $(DIST_DIR)
 	@printf "  \033[92m✓\033[0m  Clean\n"
 
-# ── Help ──────────────────────────────────────────────────────────────────────
 help:
 	@printf "\n  \033[96;1m⬡ LegendaryOS Builder — Makefile\033[0m\n\n"
 	@printf "  \033[97;1mTargets:\033[0m\n"
-	@printf "    \033[96mmake\033[0m           build for current platform (dev)\n"
-	@printf "    \033[96mmake build\033[0m     same as above\n"
-	@printf "    \033[96mmake release\033[0m   build dist/legendaryos-linux-amd64.tar.gz\n"
-	@printf "    \033[96mmake install\033[0m   sudo install to /usr/local/bin\n"
-	@printf "    \033[96mmake fmt\033[0m       go fmt\n"
-	@printf "    \033[96mmake vet\033[0m       go vet\n"
-	@printf "    \033[96mmake tidy\033[0m      go mod tidy\n"
-	@printf "    \033[96mmake test\033[0m      run tests\n"
-	@printf "    \033[96mmake clean\033[0m     remove binary and dist/\n\n"
+	@printf "    \033[96mmake\033[0m             build legendaryos-builder binary\n"
+	@printf "    \033[96mmake release\033[0m     build dist/legendaryos-builder-linux-amd64.tar.gz\n"
+	@printf "    \033[96mmake install\033[0m     sudo install to /usr/local/bin\n"
+	@printf "    \033[96mmake fmt\033[0m         go fmt\n"
+	@printf "    \033[96mmake vet\033[0m         go vet\n"
+	@printf "    \033[96mmake tidy\033[0m        go mod tidy\n"
+	@printf "    \033[96mmake test\033[0m        run tests\n"
+	@printf "    \033[96mmake clean\033[0m       remove binary and dist/\n\n"
