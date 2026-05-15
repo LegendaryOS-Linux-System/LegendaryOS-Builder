@@ -108,36 +108,44 @@ type RepoConfig struct {
 
 // Paths holds all well-known project directory paths
 type Paths struct {
-	Root        string
-	Config      string
-	PackagesDir string
-	InstallPkgs string
-	RemovePkgs  string
-	FilesDir    string
-	FilesAfter  string
-	FilesBefore string
-	ScriptsDir  string
-	ReposDir    string
-	BuildDir    string
-	CacheDir    string
-	OutputDir   string
+	Root          string
+	Config        string
+	PackagesDir   string
+	InstallPkgs   string
+	RemovePkgs    string
+	FilesDir      string
+	FilesAfter    string
+	FilesBefore   string
+	ScriptsDir    string
+	ScriptsPre    string // run on HOST before anything else
+	ScriptsBefore string // run inside container BEFORE dnf install
+	ScriptsAfter  string // run inside container AFTER dnf install
+	ReposDir      string
+	BuildDir      string
+	CacheDir      string
+	OutputDir     string
+	PodmanStorage string // isolated podman storage inside build/
 }
 
 func GetPaths(root string) *Paths {
 	return &Paths{
-		Root:        root,
-		Config:      filepath.Join(root, "config.toml"),
-		PackagesDir: filepath.Join(root, "packages"),
-		InstallPkgs: filepath.Join(root, "install.packages"),
-		RemovePkgs:  filepath.Join(root, "remove.packages"),
-		FilesDir:    filepath.Join(root, "files"),
-		FilesAfter:  filepath.Join(root, "files", "after"),
-		FilesBefore: filepath.Join(root, "files", "before"),
-		ScriptsDir:  filepath.Join(root, "scripts"),
-		ReposDir:    filepath.Join(root, "repos"),
-		BuildDir:    filepath.Join(root, "build"),
-		CacheDir:    filepath.Join(root, "build", "cache"),
-		OutputDir:   filepath.Join(root, "build", "output"),
+		Root:          root,
+		Config:        filepath.Join(root, "config.toml"),
+		PackagesDir:   filepath.Join(root, "packages"),
+		InstallPkgs:   filepath.Join(root, "packages", "install.packages"),
+		RemovePkgs:    filepath.Join(root, "packages", "remove.packages"),
+		FilesDir:      filepath.Join(root, "files"),
+		FilesAfter:    filepath.Join(root, "files", "after"),
+		FilesBefore:   filepath.Join(root, "files", "before"),
+		ScriptsDir:    filepath.Join(root, "scripts"),
+		ScriptsPre:    filepath.Join(root, "scripts", "pre"),
+		ScriptsBefore: filepath.Join(root, "scripts", "before"),
+		ScriptsAfter:  filepath.Join(root, "scripts", "after"),
+		ReposDir:      filepath.Join(root, "repos"),
+		BuildDir:      filepath.Join(root, "build"),
+		CacheDir:      filepath.Join(root, "build", "cache"),
+		OutputDir:     filepath.Join(root, "build", "output"),
+		PodmanStorage: filepath.Join(root, "build", "podman-storage"),
 	}
 }
 
@@ -230,6 +238,10 @@ func Load(root string) (*Config, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading config.toml: %w", err)
+	}
+	// Auto-detect license from LICENSE file if not specified in config
+	if cfg.Project.License == "" {
+		cfg.Project.License = DetectLicense(root)
 	}
 	return cfg, nil
 }
@@ -468,4 +480,50 @@ func ReadPackageList(path string) ([]string, error) {
 		}
 	}
 	return pkgs, scanner.Err()
+}
+
+// DetectLicense reads the LICENSE file in root and guesses the SPDX identifier.
+func DetectLicense(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, "LICENSE"))
+	if err != nil {
+		// try LICENSE.md, LICENSE.txt
+		for _, name := range []string{"LICENSE.md", "LICENSE.txt", "COPYING"} {
+			if d, err2 := os.ReadFile(filepath.Join(root, name)); err2 == nil {
+				data = d
+				break
+			}
+		}
+		if data == nil {
+			return ""
+		}
+	}
+	text := strings.ToLower(string(data))
+	switch {
+	case strings.Contains(text, "mit license") || strings.Contains(text, "permission is hereby granted, free of charge"):
+		return "MIT"
+	case strings.Contains(text, "apache license") && strings.Contains(text, "version 2"):
+		return "Apache-2.0"
+	case strings.Contains(text, "gnu general public license") && strings.Contains(text, "version 3"):
+		return "GPL-3.0"
+	case strings.Contains(text, "gnu general public license") && strings.Contains(text, "version 2"):
+		return "GPL-2.0"
+	case strings.Contains(text, "gnu lesser general public license") && strings.Contains(text, "version 3"):
+		return "LGPL-3.0"
+	case strings.Contains(text, "gnu lesser general public license") && strings.Contains(text, "version 2"):
+		return "LGPL-2.1"
+	case strings.Contains(text, "mozilla public license") && strings.Contains(text, "2.0"):
+		return "MPL-2.0"
+	case strings.Contains(text, "bsd 2-clause") || (strings.Contains(text, "redistribution") && strings.Contains(text, "2 conditions")):
+		return "BSD-2-Clause"
+	case strings.Contains(text, "bsd 3-clause") || (strings.Contains(text, "redistribution") && strings.Contains(text, "3 conditions")):
+		return "BSD-3-Clause"
+	case strings.Contains(text, "isc license") || strings.Contains(text, "isc"):
+		return "ISC"
+	case strings.Contains(text, "unlicense") || strings.Contains(text, "public domain"):
+		return "Unlicense"
+	case strings.Contains(text, "creative commons") && strings.Contains(text, "4.0"):
+		return "CC-BY-4.0"
+	default:
+		return "UNKNOWN"
+	}
 }
