@@ -30,6 +30,8 @@ func Execute() {
 	rest := os.Args[2:]
 
 	switch cmd {
+	case "settings":
+		cmdSettings(rest)
 	case "build":
 		cmdBuild(rest)
 	case "init":
@@ -115,9 +117,12 @@ func cmdBuild(args []string) {
 		cmdBuildCloud(args[1:])
 	case "iso":
 		cmdBuildISO(args[1:])
+	case "--release", "release":
+		// build --release = build cloud --push + build iso sequentially
+		cmdBuildRelease(args[1:])
 	default:
 		ui.SmallBanner()
-		ui.Error("Unknown build target %q — use 'cloud' or 'iso'", args[0])
+		ui.Error("Unknown build target %q — use 'cloud', 'iso' or '--release'", args[0])
 		os.Exit(1)
 	}
 }
@@ -145,14 +150,23 @@ func cmdBuildCloud(args []string) {
 	if err != nil {
 		ui.Fatal("%v", err)
 	}
+	uc, err := config.LoadUser(root)
+	if err != nil {
+		ui.Warn("Cannot read user.toml: %v", err)
+		uc = &config.UserConfig{}
+	}
 	paths := config.GetPaths(root)
-	tag := imageTag(cfg)
+	tag := imageTag(cfg, uc)
+
+	// Ask for GitHub token — required for ghcr.io push/pull
+	token := askGitHubToken(uc)
 
 	ui.Section("Cloud Build")
 	ui.Info("Project  : %s %s", cfg.Project.Name, cfg.Project.Version)
 	ui.Info("Base     : quay.io/fedora/fedora-bootc:%d", cfg.Project.BaseVersion)
 	ui.Info("Image    : %s", tag)
 	ui.Info("Platform : %s", *platform)
+	ui.Info("Registry : %s", registryHost(cfg, uc))
 	if *push    { ui.Info("Push     : yes") }
 	if *release { ui.Info("Mode     : RELEASE") }
 	ui.Newline()
@@ -160,8 +174,10 @@ func cmdBuildCloud(args []string) {
 	b := builder.NewCloud(cfg, paths, verb, *release)
 
 	steps := []namedStep{
+		{"Pre-scripts (host)",     func() error { return b.RunPreScripts() }},
 		{"Validate project",       b.Validate},
 		{"Prepare build dirs",     b.PrepareDirs},
+		{"Registry login",         func() error { return b.RegistryLogin(registryHost(cfg, uc), uc.GitHub.Name, token) }},
 		{"Copy repos",             b.CopyRepos},
 		{"Generate Containerfile", func() error { return b.GenerateContainerfile(*platform) }},
 		{"podman build",           func() error { return b.PodmanBuild(tag, *noCache) }},
@@ -199,11 +215,16 @@ func cmdBuildISO(args []string) {
 	if err != nil {
 		ui.Fatal("%v", err)
 	}
+	uc, err := config.LoadUser(root)
+	if err != nil {
+		ui.Warn("Cannot read user.toml: %v", err)
+		uc = &config.UserConfig{}
+	}
 	paths := config.GetPaths(root)
 
 	srcImage := *source
 	if srcImage == "" {
-		srcImage = imageTag(cfg)
+		srcImage = imageTag(cfg, uc)
 	}
 
 	outPath := *output
@@ -230,6 +251,9 @@ func cmdBuildISO(args []string) {
 		ksPath = filepath.Join(paths.BuildDir, "anaconda.ks")
 	}
 
+	// Token needed to pull the private image from ghcr.io
+	token := askGitHubToken(uc)
+
 	ui.Section("ISO Build")
 	ui.Info("Source   : %s", srcImage)
 	ui.Info("Output   : %s", outPath)
@@ -244,6 +268,7 @@ func cmdBuildISO(args []string) {
 		{"Validate project",   bISO.Validate},
 		{"Prepare build dirs", bISO.PrepareDirs},
 		{"Check tools",        bISO.CheckTools},
+		{"Registry login",     func() error { return bISO.RegistryLogin(registryHost(cfg, uc), uc.GitHub.Name, token) }},
 	}
 	if cfg.Anaconda.Enabled {
 		ks := ksPath
@@ -339,7 +364,115 @@ func cmdSetup(args []string) {
 	ui.Newline()
 }
 
-// ── validate ──────────────────────────────────────────────────────────────────
+// cmdBuildRelease runs build cloud --push then build iso sequentially.
+// This is the full release pipeline: container → registry → bootable ISO.
+func cmdBuildRelease(args []string) {
+	fs := flag.NewFlagSet("build --release", flag.ExitOnError)
+	verbose := fs.Bool("verbose", false, "Verbose output")
+	vShort  := fs.Bool("v", false, "Verbose output (short)")
+	noCache := fs.Bool("no-cache", false, "Disable layer cache")
+	fs.Parse(args) //nolint
+
+	verb := *verbose || *vShort
+	ui.SmallBanner()
+
+	root := cwd()
+	cfg, err := config.Load(root)
+	if err != nil {
+		ui.Fatal("%v", err)
+	}
+	uc, err := config.LoadUser(root)
+	if err != nil {
+		uc = &config.UserConfig{}
+	}
+
+	// Ask for token once — reused for both cloud and iso
+	token := askGitHubToken(uc)
+
+	tag := imageTag(cfg, uc)
+	reg := registryHost(cfg, uc)
+	username := uc.GitHub.Name
+
+	ui.Section("Release Pipeline")
+	ui.Info("Step 1/2 : build cloud --push (build + push container)")
+	ui.Info("Step 2/2 : build iso          (container → bootable ISO)")
+	ui.Info("Image    : %s", tag)
+	ui.Newline()
+
+	// ── Phase 1: build cloud ─────────────────────────────────────────────────
+	ui.Section("Phase 1 — Cloud Build")
+	start1 := time.Now()
+	paths := config.GetPaths(root)
+	b := builder.NewCloud(cfg, paths, verb, true) // release=true
+
+	cloudSteps := []namedStep{
+		{"Pre-scripts (host)",     func() error { return b.RunPreScripts() }},
+		{"Validate project",       b.Validate},
+		{"Prepare build dirs",     b.PrepareDirs},
+		{"Registry login",         func() error { return b.RegistryLogin(reg, username, token) }},
+		{"Copy repos",             b.CopyRepos},
+		{"Generate Containerfile", func() error { return b.GenerateContainerfile("linux/amd64") }},
+		{"podman build",           func() error { return b.PodmanBuild(tag, *noCache) }},
+		{"podman push",            func() error { return b.PodmanPush(tag) }},
+	}
+	runSteps(cloudSteps, cfg, start1, tag, "")
+
+	// ── Phase 2: build iso ───────────────────────────────────────────────────
+	ui.Section("Phase 2 — ISO Build")
+	start2 := time.Now()
+
+	name := strings.ReplaceAll(cfg.Project.Name, " ", "-")
+	fn := cfg.Build.ISOFilename
+	if fn == "" {
+		fn = fmt.Sprintf("%s-%s-fedora%d.x86_64.iso", name, cfg.Project.Version, cfg.Project.BaseVersion)
+	}
+	outPath := filepath.Join(paths.OutputDir, fn)
+	isoLabel := cfg.Build.ISOLabel
+	if isoLabel == "" {
+		isoLabel = strings.ToUpper(strings.ReplaceAll(cfg.Project.Name, " ", "_"))
+	}
+	ksPath := ""
+	if cfg.Anaconda.Enabled {
+		ksPath = filepath.Join(paths.BuildDir, "anaconda.ks")
+	}
+
+	bISO := builder.NewISO(cfg, paths, verb, true) // release=true
+
+	isoSteps := []namedStep{
+		{"Validate project",   bISO.Validate},
+		{"Prepare build dirs", bISO.PrepareDirs},
+		{"Check tools",        bISO.CheckTools},
+		{"Registry login",     func() error { return bISO.RegistryLogin(reg, username, token) }},
+	}
+	if cfg.Anaconda.Enabled {
+		ks := ksPath
+		isoSteps = append(isoSteps, namedStep{"Generate kickstart",
+			func() error { return bISO.GenerateKickstart(ks) }})
+	}
+	t, o, l, k := tag, outPath, isoLabel, ksPath
+	isoSteps = append(isoSteps,
+		namedStep{"Pull source image", func() error { return bISO.PullImage(t) }},
+		namedStep{"Build ISO",         func() error { return bISO.BuildISO(t, o, l, k) }},
+		namedStep{"Verify ISO",        func() error { return bISO.VerifyISO(o) }},
+	)
+	runSteps(isoSteps, cfg, start2, "", outPath)
+}
+
+// registryHost returns just the hostname part of the registry (e.g. "ghcr.io").
+func registryHost(cfg *config.Config, uc *config.UserConfig) string {
+	reg := cfg.Container.Registry
+	if reg == "" || reg == "custom" {
+		if uc != nil && uc.Registry() != "" {
+			return "ghcr.io"
+		}
+		return "ghcr.io"
+	}
+	// extract host from full registry string
+	parts := strings.SplitN(reg, "/", 2)
+	return parts[0]
+}
+
+
 
 func cmdValidate(_ []string) {
 	ui.SmallBanner()
@@ -370,7 +503,30 @@ func cmdValidate(_ []string) {
 			}
 			return nil
 		}},
-		{"install.packages", func() error {
+		{"desktop environment", func() error {
+			env := cfg.Desktop.Environment
+			valid := map[string]bool{
+				"gnome": true, "kde": true, "xfce": true,
+				"cinnamon": true, "mate": true, "lxqt": true,
+				"cosmic": true, "none": true, "": true,
+			}
+			if !valid[env] {
+				return fmt.Errorf("unknown environment %q", env)
+			}
+			if env == "cosmic" {
+				// Check that cosmic.repo exists
+				cosmicRepoPath := filepath.Join(paths.ReposDir, "cosmic.repo")
+				if _, err := os.Stat(cosmicRepoPath); os.IsNotExist(err) {
+					ui.Warn("repos/cosmic.repo not found — COSMIC packages won't install")
+					ui.Warn("Run: legendaryos init to regenerate, or add repos/cosmic.repo manually")
+				} else {
+					ui.Info("repos/cosmic.repo present")
+				}
+			}
+			ui.Info("environment = %s", env)
+			return nil
+		}},
+		{"packages/install.packages", func() error {
 			pkgs, err := config.ReadPackageList(paths.InstallPkgs)
 			if err != nil {
 				return err
@@ -378,7 +534,7 @@ func cmdValidate(_ []string) {
 			ui.Info("%d packages to install", len(pkgs))
 			return nil
 		}},
-		{"remove.packages", func() error {
+		{"packages/remove.packages", func() error {
 			pkgs, err := config.ReadPackageList(paths.RemovePkgs)
 			if err != nil {
 				return err
@@ -388,7 +544,8 @@ func cmdValidate(_ []string) {
 		}},
 		{"files/before/", func() error { ui.Info("%d files", countFiles(paths.FilesBefore)); return nil }},
 		{"files/after/",  func() error { ui.Info("%d files", countFiles(paths.FilesAfter)); return nil }},
-		{"scripts/",      func() error { ui.Info("%d scripts", countFiles(paths.ScriptsDir)); return nil }},
+		{"scripts/before/", func() error { ui.Info("%d scripts", countFiles(paths.ScriptsBefore)); return nil }},
+		{"scripts/after/",  func() error { ui.Info("%d scripts", countFiles(paths.ScriptsAfter)); return nil }},
 		{"repos/",        func() error { ui.Info("%d repos", countFiles(paths.ReposDir)); return nil }},
 	}
 
@@ -447,8 +604,9 @@ func cmdInfo(_ []string) {
 
 	ui.Section("Container / bootc")
 	if cfg.Container.Enabled {
+		uc2, _ := config.LoadUser(root)
 		kv("Registry", cfg.Container.Registry)
-		kv("Image tag", imageTag(cfg))
+		kv("Image tag", imageTag(cfg, uc2))
 		kv("Auto push", fmt.Sprintf("%v", cfg.Container.Push))
 	} else {
 		ui.Info("Container build disabled")
@@ -492,12 +650,20 @@ func cwd() string {
 	return d
 }
 
-func imageTag(cfg *config.Config) string {
+// imageTag computes the full OCI image tag.
+// If config.toml has registry = "custom", reads the registry from user.toml.
+func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	reg := cfg.Container.Registry
 	img := cfg.Container.Image
 	tag := cfg.Container.Tag
-	if reg == "" {
-		reg = "ghcr.io/myorg"
+
+	// "custom" means: use registry from user.toml
+	if reg == "" || reg == "custom" {
+		if uc != nil && uc.Registry() != "" {
+			reg = uc.Registry()
+		} else {
+			reg = "ghcr.io/myorg"
+		}
 	}
 	if img == "" {
 		img = strings.ToLower(strings.ReplaceAll(cfg.Project.Name, " ", "-"))
@@ -510,6 +676,51 @@ func imageTag(cfg *config.Config) string {
 	}
 	return fmt.Sprintf("%s/%s:%s", reg, img, tag)
 }
+
+// askGitHubToken prompts the user for a GitHub token interactively.
+// If user.toml already has a token stored, asks whether to use it.
+// Returns the token string.
+func askGitHubToken(uc *config.UserConfig) string {
+	// Check env first — CI/CD sets GITHUB_TOKEN
+	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
+		ui.Info("Token: using $GITHUB_TOKEN from environment")
+		return t
+	}
+	// Check user.toml stored token
+	if uc != nil && uc.GitHub.Token != "" {
+		ui.Info("Token: found in user.toml")
+		return uc.GitHub.Token
+	}
+	// Interactive prompt — hide input
+	ui.Newline()
+	fmt.Fprintf(ui.Out, "  \033[93m⚠\033[0m  GitHub token required for registry access\n")
+	fmt.Fprintf(ui.Out, "  \033[90mGet one at: https://github.com/settings/tokens\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90mRequired scopes: write:packages, read:packages\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90m(input hidden)\033[0m\n\n")
+	fmt.Fprintf(ui.Out, "  \033[96m›\033[0m \033[97;1mGitHub Token\033[0m: ")
+
+	// Try to disable echo for password input
+	token := readSecret()
+	fmt.Fprintln(ui.Out)
+	if token == "" {
+		ui.Fatal("No token provided — cannot authenticate with ghcr.io")
+	}
+	return token
+}
+
+// readSecret reads a line from stdin without echoing (best-effort).
+func readSecret() string {
+	// Try syscall-based no-echo
+	b, err := readNoEcho()
+	if err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	// Fallback: normal read (token will be visible)
+	var line string
+	fmt.Scanln(&line)
+	return strings.TrimSpace(line)
+}
+
 
 func countFiles(dir string) int {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
