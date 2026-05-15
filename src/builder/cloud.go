@@ -17,7 +17,7 @@ import (
 //   1. Validate project
 //   2. Prepare build/ dirs
 //   3. Copy repos/ into build context
-//   4. Generate Containerfile  (from config + install.packages + files/ + scripts/)
+//   4. Generate Containerfile  (from config + packages/install.packages + files/ + scripts/)
 //   5. podman build --tag <registry/image:tag>
 //   6. (optional) podman push
 //   7. (optional) cosign sign
@@ -173,6 +173,20 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 		blank()
 	}
 
+	// scripts/before/ — run BEFORE package install
+	if hasDir(b.paths.ScriptsBefore) {
+		comment("── scripts/before/ — run BEFORE package install ───────────────────")
+		comment("  .sh → bash   .py → python3   .pl → perl   .rb → ruby")
+		line("COPY scripts/before/ /tmp/los-scripts-before/")
+		line("RUN set -eux \\")
+		line("    && for f in $(ls /tmp/los-scripts-before/*.sh  2>/dev/null | sort); do bash    \"$f\"; done \\")
+		line("    && for f in $(ls /tmp/los-scripts-before/*.py  2>/dev/null | sort); do python3 \"$f\"; done \\")
+		line("    && for f in $(ls /tmp/los-scripts-before/*.pl  2>/dev/null | sort); do perl    \"$f\"; done \\")
+		line("    && for f in $(ls /tmp/los-scripts-before/*.rb  2>/dev/null | sort); do ruby    \"$f\"; done \\")
+		line("    && rm -rf /tmp/los-scripts-before")
+		blank()
+	}
+
 	// files/before/ overlay
 	if hasDir(b.paths.FilesBefore) {
 		comment("── Pre-install overlay (files/before/) ────────────────────────────")
@@ -182,8 +196,8 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 
 	// Install packages
 	if len(install) > 0 {
-		comment("── Install packages (install.packages) ────────────────────────────")
-		line("RUN dnf install -y \\")
+		comment("── Install packages (packages/install.packages) ───────────────────")
+		line("RUN dnf install -y --skip-unavailable \\")
 		for _, pkg := range install {
 			line("    %s \\", pkg)
 		}
@@ -194,7 +208,7 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 
 	// Remove packages
 	if len(remove) > 0 {
-		comment("── Remove packages (remove.packages) ──────────────────────────────")
+		comment("── Remove packages (packages/remove.packages) ─────────────────────")
 		line("RUN dnf remove -y \\")
 		for i, pkg := range remove {
 			if i < len(remove)-1 {
@@ -213,17 +227,17 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 		blank()
 	}
 
-	// Scripts — all supported interpreters in one RUN
-	if hasDir(b.paths.ScriptsDir) {
-		comment("── Hooks / scripts (scripts/) ─────────────────────────────────────")
+	// scripts/after/ — run AFTER package install
+	if hasDir(b.paths.ScriptsAfter) {
+		comment("── scripts/after/ — run AFTER package install ─────────────────────")
 		comment("  .sh → bash   .py → python3   .pl → perl   .rb → ruby")
-		line("COPY scripts/ /tmp/los-scripts/")
+		line("COPY scripts/after/ /tmp/los-scripts-after/")
 		line("RUN set -eux \\")
-		line("    && for f in $(ls /tmp/los-scripts/*.sh  2>/dev/null | sort); do bash    \"$f\"; done \\")
-		line("    && for f in $(ls /tmp/los-scripts/*.py  2>/dev/null | sort); do python3 \"$f\"; done \\")
-		line("    && for f in $(ls /tmp/los-scripts/*.pl  2>/dev/null | sort); do perl    \"$f\"; done \\")
-		line("    && for f in $(ls /tmp/los-scripts/*.rb  2>/dev/null | sort); do ruby    \"$f\"; done \\")
-		line("    && rm -rf /tmp/los-scripts")
+		line("    && for f in $(ls /tmp/los-scripts-after/*.sh  2>/dev/null | sort); do bash    \"$f\"; done \\")
+		line("    && for f in $(ls /tmp/los-scripts-after/*.py  2>/dev/null | sort); do python3 \"$f\"; done \\")
+		line("    && for f in $(ls /tmp/los-scripts-after/*.pl  2>/dev/null | sort); do perl    \"$f\"; done \\")
+		line("    && for f in $(ls /tmp/los-scripts-after/*.rb  2>/dev/null | sort); do ruby    \"$f\"; done \\")
+		line("    && rm -rf /tmp/los-scripts-after")
 		blank()
 	}
 
@@ -271,54 +285,108 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 	return sb.String()
 }
 
-// PodmanBuild runs `podman build` to produce the tagged image.
+// RegistryLogin logs into the OCI registry using podman login.
+// Uses the isolated storage so credentials don't touch global podman config.
+func (b *CloudBuilder) RegistryLogin(registry, username, token string) error {
+	if token == "" {
+		ui.Info("No token — skipping registry login")
+		return nil
+	}
+	if username == "" {
+		username = "token" // ghcr.io accepts any username with a PAT
+	}
+	ui.Info("Logging into %s as %s", registry, username)
+	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
+	env := append(os.Environ(), "CONTAINERS_STORAGE_CONF="+storageCfg)
+	return b.runEnv(env, "podman", "login",
+		"--username", username,
+		"--password", token,
+		registry,
+	)
+}
+
+
 //
-// What podman does internally:
-//   - Reads the Containerfile layer by layer
-//   - Each RUN spins up a temporary container, executes the command,
-//     captures the filesystem diff as a new layer
-//   - Final image = stacked layers stored in local podman image store
+// Storage isolation:
+//   All podman layers, images and tmp files are written to
+//   build/podman-storage  (inside the project directory).
+//   This means you can put the project on any disk with enough space
+//   and podman will never touch /var/tmp or ~/.local/share/containers.
+//
+//   Implementation: we pass --storage-driver=overlay and set
+//   CONTAINERS_STORAGE_CONF + XDG_DATA_HOME env vars so this instance
+//   of podman uses a completely separate storage root without touching
+//   the user's global podman configuration.
 func (b *CloudBuilder) PodmanBuild(tag string, noCache bool) error {
 	cfPath := filepath.Join(b.paths.BuildDir, "Containerfile")
+	storageDir := b.paths.PodmanStorage
 
-	// Build context = project root so COPY files/after/ etc. resolve correctly
+	// ensure storage dir exists
+	if err := os.MkdirAll(storageDir, 0755); err != nil {
+		return fmt.Errorf("cannot create podman storage dir %s: %w", storageDir, err)
+	}
+
+	// write a minimal storage.conf scoped to our build dir
+	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
+	storageCfgContent := fmt.Sprintf(`[storage]
+driver = "overlay"
+graphRoot = "%s/graph"
+runRoot = "%s/run"
+`, storageDir, storageDir)
+	if err := os.WriteFile(storageCfg, []byte(storageCfgContent), 0644); err != nil {
+		return fmt.Errorf("cannot write storage.conf: %w", err)
+	}
+
+	ui.Info("Podman storage: %s", storageDir)
+
 	args := []string{"build", "--tag", tag, "--file", cfPath}
 	if noCache {
 		args = append(args, "--no-cache")
 	}
 	if b.release {
-		// squash-all merges all layers into one → smaller image
 		args = append(args, "--squash-all")
 	}
 	args = append(args, b.paths.Root)
 
 	ui.Info("podman %s", strings.Join(args, " "))
-	return b.run("podman", args...)
+
+	// Pass isolated storage config via env — no global config touched
+	env := os.Environ()
+	env = append(env,
+		"CONTAINERS_STORAGE_CONF="+storageCfg,
+		"TMPDIR="+filepath.Join(storageDir, "tmp"),
+	)
+	os.MkdirAll(filepath.Join(storageDir, "tmp"), 0755) //nolint
+	os.MkdirAll(filepath.Join(storageDir, "graph"), 0755) //nolint
+	os.MkdirAll(filepath.Join(storageDir, "run"), 0755) //nolint
+
+	return b.runEnv(env, "podman", args...)
 }
 
-// PodmanPush pushes the built image to the OCI registry.
-// The registry URL comes from the image tag (e.g. ghcr.io/org/name:tag).
+// PodmanPush pushes the built image using the same isolated storage.
 func (b *CloudBuilder) PodmanPush(tag string) error {
 	ui.Info("Pushing: %s", tag)
-	return b.run("podman", "push", tag)
+	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
+	env := append(os.Environ(), "CONTAINERS_STORAGE_CONF="+storageCfg)
+	return b.runEnv(env, "podman", "push", tag)
 }
 
-// CosignSign signs the pushed image in-registry using cosign keyless signing.
-// Requires OIDC token (available in GitHub Actions via id-token permission).
+// CosignSign signs the pushed image with cosign keyless signing.
 func (b *CloudBuilder) CosignSign(tag string) error {
 	ui.Info("Signing with cosign: %s", tag)
-	return b.run("cosign", "sign", "--yes", tag)
+	return b.runEnv(os.Environ(), "cosign", "sign", "--yes", tag)
 }
 
 func (b *CloudBuilder) run(name string, args ...string) error {
+	return b.runEnv(os.Environ(), name, args...)
+}
+
+func (b *CloudBuilder) runEnv(env []string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	cmd.Env = os.Environ()
+	cmd.Env = env
+	cmd.Stderr = os.Stderr
 	if b.verbose {
 		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	} else {
-		// capture stderr so we can show it on failure
-		cmd.Stderr = os.Stderr
 	}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
@@ -330,4 +398,55 @@ func (b *CloudBuilder) run(name string, args ...string) error {
 func hasDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// RunPreScripts executes scripts/pre/ on the HOST before any build step.
+// These run with full host access — useful for checking dependencies,
+// pre-pulling images, validating environment, setting up secrets etc.
+// Order: alphabetical. Supported: .sh .py .pl .rb
+func (b *CloudBuilder) RunPreScripts() error {
+	if !hasDir(b.paths.ScriptsPre) {
+		ui.Info("No scripts/pre/ directory — skipping")
+		return nil
+	}
+	entries, err := os.ReadDir(b.paths.ScriptsPre)
+	if err != nil {
+		return fmt.Errorf("cannot read scripts/pre/: %w", err)
+	}
+	interps := map[string]string{
+		".sh": "bash", ".bash": "bash",
+		".py": "python3",
+		".pl": "perl",
+		".rb": "ruby",
+	}
+	ran := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(e.Name())
+		interp, ok := interps[ext]
+		if !ok {
+			continue
+		}
+		scriptPath := filepath.Join(b.paths.ScriptsPre, e.Name())
+		ui.Info("[pre] %s  (%s)", e.Name(), interp)
+		cmd := exec.Command(interp, scriptPath)
+		cmd.Env = append(os.Environ(),
+			"LEGENDARYOS_PROJECT="+b.cfg.Project.Name,
+			"LEGENDARYOS_VERSION="+b.cfg.Project.Version,
+			"LEGENDARYOS_BUILD="+b.paths.BuildDir,
+			"LEGENDARYOS_ROOT="+b.paths.Root,
+		)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("pre-script %s failed: %w", e.Name(), err)
+		}
+		ran++
+	}
+	if ran > 0 {
+		ui.OK("Pre-scripts done (%d ran)", ran)
+	}
+	return nil
 }
