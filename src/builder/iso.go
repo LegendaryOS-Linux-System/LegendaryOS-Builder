@@ -103,7 +103,24 @@ func (b *ISOBuilder) CheckTools() error {
 	return nil
 }
 
-// PullImage ensures the source image is in the local podman image store.
+// RegistryLogin logs into the registry before pulling the source image.
+func (b *ISOBuilder) RegistryLogin(registry, username, token string) error {
+	if token == "" {
+		ui.Info("No token — skipping registry login")
+		return nil
+	}
+	if username == "" {
+		username = "token"
+	}
+	ui.Info("Logging into %s as %s", registry, username)
+	return b.run("podman", "login",
+		"--username", username,
+		"--password", token,
+		registry,
+	)
+}
+
+
 func (b *ISOBuilder) PullImage(image string) error {
 	// If it looks like a local image name (no registry prefix), skip pull
 	if !strings.Contains(image, "/") || strings.HasPrefix(image, "localhost/") {
