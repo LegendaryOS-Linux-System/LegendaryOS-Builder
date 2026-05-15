@@ -11,13 +11,15 @@ func PrintUsage(version string) {
 	type entry struct{ cmd, desc string }
 	cmds := []entry{
 		{"build cloud",                    "Build bootc container image with podman"},
-		{"build cloud --push",             "Build and push to registry"},
+		{"build cloud --push",             "Build and push to ghcr.io (asks for token)"},
 		{"build cloud --push --sign",      "Build, push and sign with cosign"},
 		{"build cloud --no-cache",         "Disable layer cache (fresh build)"},
 		{"build cloud --release",          "Release mode: squash layers, strip debug"},
 		{"build iso",                      "Build bootable ISO from container image"},
 		{"build iso --source <img>",       "ISO from a specific container image"},
 		{"build iso --output <path>",      "Write ISO to a specific path"},
+		{"build --release",                "Full pipeline: cloud --push + iso (asks for token once)"},
+		{"settings",                          "Interactive TUI config editor (saves config.toml)"},
 		{"", ""},
 		{"init [dir]",                     "Initialize project scaffold in dir"},
 		{"init --fast",                    "Interactive wizard (asks questions)"},
