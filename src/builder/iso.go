@@ -58,18 +58,32 @@ func (b *ISOBuilder) Validate() error {
 }
 
 func (b *ISOBuilder) PrepareDirs() error {
+	storageDir := b.paths.PodmanStorage
 	dirs := []string{
 		b.paths.BuildDir,
 		b.paths.CacheDir,
 		b.paths.OutputDir,
 		filepath.Join(b.paths.BuildDir, "iso-work"),
+		filepath.Join(storageDir, "graph"),
+		filepath.Join(storageDir, "run"),
+		filepath.Join(storageDir, "tmp"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return fmt.Errorf("cannot create %s: %w", d, err)
 		}
 	}
+
+	// Write storage.conf — same isolated storage as cloud build
+	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
+	content := fmt.Sprintf("[storage]\ndriver = \"overlay\"\ngraphRoot = \"%s/graph\"\nrunRoot = \"%s/run\"\n",
+		storageDir, storageDir)
+	if err := os.WriteFile(storageCfg, []byte(content), 0644); err != nil {
+		return fmt.Errorf("cannot write storage.conf: %w", err)
+	}
+
 	ui.OK("Build directories ready")
+	ui.Info("Podman storage: %s", storageDir)
 	return nil
 }
 
@@ -182,18 +196,20 @@ func (b *ISOBuilder) BuildISO(sourceImage, output, label, kickstart string) erro
 func (b *ISOBuilder) buildViaBinary(sourceImage, outDir, finalPath, label, kickstart string) error {
 	ui.Info("Method: bootc-image-builder binary")
 
+	// Write BIB config.toml (different from project config.toml!)
+	// BIB uses its own config format for ISO customization
+	bibCfgPath, err := b.writeBIBConfig(outDir, label, kickstart)
+	if err != nil {
+		return err
+	}
+
 	args := []string{
 		"build",
 		"--type", "iso",
 		"--output", outDir,
 	}
-	if kickstart != "" {
-		if _, err := os.Stat(kickstart); err == nil {
-			args = append(args, "--config", kickstart)
-		}
-	}
-	if label != "" {
-		args = append(args, "--iso-label", label)
+	if bibCfgPath != "" {
+		args = append(args, "--config", bibCfgPath)
 	}
 	args = append(args, sourceImage)
 
@@ -206,56 +222,53 @@ func (b *ISOBuilder) buildViaBinary(sourceImage, outDir, finalPath, label, kicks
 }
 
 // buildViaPodman runs bootc-image-builder inside a privileged podman container.
-// This is the standard recommended way — no host install of bootc-image-builder needed.
 //
-//	podman run --rm --privileged \
-//	  --volume /var/lib/containers/storage:/var/lib/containers/storage \
-//	  --volume <outDir>:/output \
-//	  [--volume <kickstart>:/config.ks:ro] \
-//	  quay.io/centos-bootc/bootc-image-builder:latest \
-//	  build --type iso --output /output <sourceImage>
+// Key design decisions:
+//  1. --iso-label does NOT exist in BIB — removed
+//  2. Storage: mount project's podman-storage (not /var/lib/containers)
+//     so everything stays on the external disk, not the system disk
+//  3. Kickstart: embedded via BIB config.toml (--config flag)
 func (b *ISOBuilder) buildViaPodman(sourceImage, outDir, finalPath, label, kickstart string) error {
 	bibImage := "quay.io/centos-bootc/bootc-image-builder:latest"
 	ui.Info("Method: bootc-image-builder via podman (privileged container)")
 	ui.Info("BIB image: %s", bibImage)
 
+	// Write BIB's own config.toml if we have a kickstart to embed
+	bibCfgPath, err := b.writeBIBConfig(outDir, label, kickstart)
+	if err != nil {
+		return fmt.Errorf("cannot write BIB config: %w", err)
+	}
+
+	// Mount project storage so BIB can find the already-pulled source image.
+	// PullImage() stored it in build/podman-storage/graph.
+	storageDir := b.paths.PodmanStorage
+
 	args := []string{
 		"run", "--rm",
 		"--privileged",
 		"--pull=newer",
-		// Share the host container storage so BIB can access the source image
-		// without pulling it again
-		"--volume", "/var/lib/containers/storage:/var/lib/containers/storage",
-		// Output directory
+		// Project's isolated storage → BIB can find the source image here
+		"--volume", storageDir + ":/var/lib/containers/storage",
+		// Output goes here
 		"--volume", outDir + ":/output",
-		// Needed for osbuild inside BIB
+		// osbuild needs device access
 		"--volume", "/dev:/dev",
 	}
 
-	// Mount kickstart if present
-	if kickstart != "" {
-		if _, err := os.Stat(kickstart); err == nil {
-			args = append(args, "--volume", kickstart+":/config.ks:ro")
-		}
+	// Mount BIB config if we generated one
+	if bibCfgPath != "" {
+		args = append(args, "--volume", bibCfgPath+":/config.toml:ro")
 	}
 
-	// The bootc-image-builder image
+	// BIB container image
 	args = append(args, bibImage)
 
-	// bootc-image-builder sub-command
+	// BIB sub-command — no --iso-label, configured via config.toml
 	args = append(args, "build", "--type", "iso", "--output", "/output")
-
-	if kickstart != "" {
-		if _, err := os.Stat(kickstart); err == nil {
-			args = append(args, "--config", "/config.ks")
-		}
-	}
-	if label != "" {
-		args = append(args, "--iso-label", label)
+	if bibCfgPath != "" {
+		args = append(args, "--config", "/config.toml")
 	}
 
-	// Source image — must be reachable from inside the BIB container.
-	// Since we shared /var/lib/containers/storage the local image is visible.
 	args = append(args, sourceImage)
 
 	ui.Info("podman %s", strings.Join(args, " "))
@@ -263,14 +276,52 @@ func (b *ISOBuilder) buildViaPodman(sourceImage, outDir, finalPath, label, kicks
 		return fmt.Errorf(
 			"bootc-image-builder failed\n\n"+
 				"  Common fixes:\n"+
-				"    • Run as root / with sudo\n"+
-				"    • Make sure the source image exists locally:\n"+
-				"        podman images | grep %s\n"+
-				"    • Pull it first: legendaryos build iso --source <registry/img:tag>\n",
+				"    • Run as root / with sudo (BIB needs privileged access)\n"+
+				"    • On Debian/Ubuntu: podman must be installed and functional\n"+
+				"    • Check pulled image: podman images | grep %s\n",
 			sourceImage)
 	}
 
 	return b.renameOutput(outDir, finalPath)
+}
+
+// writeBIBConfig generates bootc-image-builder's own config.toml.
+// This is NOT the project config.toml — BIB uses a different schema.
+// Handles: kickstart embedding.
+// Label is NOT supported by BIB config — it's set by the ISO build process itself.
+func (b *ISOBuilder) writeBIBConfig(outDir, label, kickstart string) (string, error) {
+	hasKS := kickstart != "" && func() bool {
+		_, err := os.Stat(kickstart)
+		return err == nil
+	}()
+
+	if !hasKS {
+		return "", nil // nothing to configure
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# bootc-image-builder config — generated by LegendaryOS Builder\n")
+	sb.WriteString("# Schema: https://github.com/osbuild/bootc-image-builder\n\n")
+
+	if hasKS {
+		ksData, err := os.ReadFile(kickstart)
+		if err != nil {
+			return "", fmt.Errorf("cannot read kickstart %s: %w", kickstart, err)
+		}
+		// BIB kickstart embedding format
+		ksStr := strings.ReplaceAll(string(ksData), `"""`, `\"\"\"`)
+		sb.WriteString("[customizations]\n")
+		sb.WriteString("[customizations.installer]\n")
+		sb.WriteString("[customizations.installer.kickstart]\n")
+		sb.WriteString(fmt.Sprintf("contents = \"\"\"\n%s\"\"\"\n", ksStr))
+	}
+
+	cfgPath := filepath.Join(outDir, "bib-config.toml")
+	if err := os.WriteFile(cfgPath, []byte(sb.String()), 0644); err != nil {
+		return "", fmt.Errorf("cannot write bib config: %w", err)
+	}
+	ui.Info("BIB config → %s", cfgPath)
+	return cfgPath, nil
 }
 
 // renameOutput finds the ISO produced by bootc-image-builder and moves it
@@ -321,8 +372,12 @@ func (b *ISOBuilder) VerifyISO(path string) error {
 }
 
 func (b *ISOBuilder) run(name string, args ...string) error {
+	return b.runEnv(b.podmanEnv(), name, args...)
+}
+
+func (b *ISOBuilder) runEnv(env []string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	cmd.Env = os.Environ()
+	cmd.Env = env
 	cmd.Stderr = os.Stderr
 	if b.verbose {
 		cmd.Stdout = os.Stdout
@@ -332,6 +387,16 @@ func (b *ISOBuilder) run(name string, args ...string) error {
 	}
 	ui.OK("%s done", name)
 	return nil
+}
+
+// podmanEnv returns environment with isolated storage.conf set
+func (b *ISOBuilder) podmanEnv() []string {
+	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
+	storageDir := b.paths.PodmanStorage
+	return append(os.Environ(),
+		"CONTAINERS_STORAGE_CONF="+storageCfg,
+		"TMPDIR="+filepath.Join(storageDir, "tmp"),
+	)
 }
 
 func copyFile(src, dst string) error {
