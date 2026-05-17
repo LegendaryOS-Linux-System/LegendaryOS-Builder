@@ -176,8 +176,8 @@ func cmdBuildCloud(args []string) {
 	steps := []namedStep{
 		{"Pre-scripts (host)",     func() error { return b.RunPreScripts() }},
 		{"Validate project",       b.Validate},
-		{"Prepare build dirs",     b.PrepareDirs},
-		{"Registry login",         func() error { return b.RegistryLogin(registryHost(cfg, uc), uc.GitHub.Name, token) }},
+		{"Prepare build dirs",     b.PrepareDirs},                                                         // ← storage.conf created here
+		{"Registry login",         func() error { return b.RegistryLogin(registryHost(cfg, uc), uc.GitHub.Name, token) }}, // ← after PrepareDirs
 		{"Copy repos",             b.CopyRepos},
 		{"Generate Containerfile", func() error { return b.GenerateContainerfile(*platform) }},
 		{"podman build",           func() error { return b.PodmanBuild(tag, *noCache) }},
@@ -408,8 +408,8 @@ func cmdBuildRelease(args []string) {
 	cloudSteps := []namedStep{
 		{"Pre-scripts (host)",     func() error { return b.RunPreScripts() }},
 		{"Validate project",       b.Validate},
-		{"Prepare build dirs",     b.PrepareDirs},
-		{"Registry login",         func() error { return b.RegistryLogin(reg, username, token) }},
+		{"Prepare build dirs",     b.PrepareDirs},                                          // ← storage.conf here
+		{"Registry login",         func() error { return b.RegistryLogin(reg, username, token) }}, // ← after PrepareDirs
 		{"Copy repos",             b.CopyRepos},
 		{"Generate Containerfile", func() error { return b.GenerateContainerfile("linux/amd64") }},
 		{"podman build",           func() error { return b.PodmanBuild(tag, *noCache) }},
@@ -657,7 +657,6 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	img := cfg.Container.Image
 	tag := cfg.Container.Tag
 
-	// "custom" means: use registry from user.toml
 	if reg == "" || reg == "custom" {
 		if uc != nil && uc.Registry() != "" {
 			reg = uc.Registry()
@@ -666,7 +665,7 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 		}
 	}
 	if img == "" {
-		img = strings.ToLower(strings.ReplaceAll(cfg.Project.Name, " ", "-"))
+		img = strings.ReplaceAll(cfg.Project.Name, " ", "-")
 	}
 	if tag == "" {
 		tag = cfg.Project.Version
@@ -674,7 +673,9 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	if tag == "" {
 		tag = "latest"
 	}
-	return fmt.Sprintf("%s/%s:%s", reg, img, tag)
+	// OCI spec: repository name must be lowercase
+	full := fmt.Sprintf("%s/%s:%s", reg, img, tag)
+	return strings.ToLower(full)
 }
 
 // askGitHubToken prompts the user for a GitHub token interactively.
