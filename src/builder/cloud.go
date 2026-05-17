@@ -44,18 +44,32 @@ func (b *CloudBuilder) Validate() error {
 }
 
 func (b *CloudBuilder) PrepareDirs() error {
+	storageDir := b.paths.PodmanStorage
 	dirs := []string{
 		b.paths.BuildDir,
 		b.paths.CacheDir,
 		b.paths.OutputDir,
 		filepath.Join(b.paths.BuildDir, "context", "repos"),
+		filepath.Join(storageDir, "graph"),
+		filepath.Join(storageDir, "run"),
+		filepath.Join(storageDir, "tmp"),
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return fmt.Errorf("cannot create %s: %w", d, err)
 		}
 	}
+
+	// Write storage.conf immediately so login/pull can use it
+	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
+	content := fmt.Sprintf("[storage]\ndriver = \"overlay\"\ngraphRoot = \"%s/graph\"\nrunRoot = \"%s/run\"\n",
+		storageDir, storageDir)
+	if err := os.WriteFile(storageCfg, []byte(content), 0644); err != nil {
+		return fmt.Errorf("cannot write storage.conf: %w", err)
+	}
+
 	ui.OK("Build directories ready")
+	ui.Info("Podman storage: %s", storageDir)
 	return nil
 }
 
@@ -319,25 +333,7 @@ func (b *CloudBuilder) RegistryLogin(registry, username, token string) error {
 //   the user's global podman configuration.
 func (b *CloudBuilder) PodmanBuild(tag string, noCache bool) error {
 	cfPath := filepath.Join(b.paths.BuildDir, "Containerfile")
-	storageDir := b.paths.PodmanStorage
-
-	// ensure storage dir exists
-	if err := os.MkdirAll(storageDir, 0755); err != nil {
-		return fmt.Errorf("cannot create podman storage dir %s: %w", storageDir, err)
-	}
-
-	// write a minimal storage.conf scoped to our build dir
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
-	storageCfgContent := fmt.Sprintf(`[storage]
-driver = "overlay"
-graphRoot = "%s/graph"
-runRoot = "%s/run"
-`, storageDir, storageDir)
-	if err := os.WriteFile(storageCfg, []byte(storageCfgContent), 0644); err != nil {
-		return fmt.Errorf("cannot write storage.conf: %w", err)
-	}
-
-	ui.Info("Podman storage: %s", storageDir)
 
 	args := []string{"build", "--tag", tag, "--file", cfPath}
 	if noCache {
@@ -350,15 +346,12 @@ runRoot = "%s/run"
 
 	ui.Info("podman %s", strings.Join(args, " "))
 
-	// Pass isolated storage config via env — no global config touched
+	storageDir := b.paths.PodmanStorage
 	env := os.Environ()
 	env = append(env,
 		"CONTAINERS_STORAGE_CONF="+storageCfg,
 		"TMPDIR="+filepath.Join(storageDir, "tmp"),
 	)
-	os.MkdirAll(filepath.Join(storageDir, "tmp"), 0755) //nolint
-	os.MkdirAll(filepath.Join(storageDir, "graph"), 0755) //nolint
-	os.MkdirAll(filepath.Join(storageDir, "run"), 0755) //nolint
 
 	return b.runEnv(env, "podman", args...)
 }
