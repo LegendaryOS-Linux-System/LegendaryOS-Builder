@@ -18,6 +18,7 @@ type Config struct {
 	Anaconda  AnacondaConfig
 	Build     BuildConfig
 	Container ContainerConfig
+	Nvidia    NvidiaConfig
 	Repos     []RepoConfig
 }
 
@@ -94,6 +95,29 @@ type ContainerConfig struct {
 	Push      bool
 	SignImage  bool
 	BootcMode bool
+}
+
+// NvidiaConfig controls proprietary NVIDIA driver installation in the ISO.
+// Drivers are installed via %post in the Anaconda kickstart using akmod-nvidia
+// from RPM Fusion. They are NOT installed in the bootc container image.
+type NvidiaConfig struct {
+	// Enabled: install NVIDIA proprietary drivers during ISO installation
+	Enabled bool
+	// InstallCUDA: also install CUDA toolkit (large, optional)
+	InstallCUDA bool
+	// InstallNVIDIASettings: install nvidia-settings GUI tool
+	InstallNVIDIASettings bool
+	// InstallVAAPI: install nvidia-vaapi-driver for hardware video decode
+	InstallVAAPI bool
+	// InstallVulkan: install nvidia Vulkan ICD (usually included in driver)
+	InstallVulkan bool
+	// Blacklist nouveau: prevent open-source nouveau from loading
+	BlacklistNouveau bool
+	// KMS: enable kernel mode setting for NVIDIA (required for Wayland)
+	EnableKMS bool
+	// OpenDriver: use nvidia-open (open-source kernel module, Turing+ only)
+	// Set to false for Maxwell/Pascal/Volta or if unsure
+	OpenDriver bool
 }
 
 type RepoConfig struct {
@@ -227,6 +251,8 @@ func Load(root string) (*Config, error) {
 			setBuildField(&cfg.Build, key, val)
 		case "container":
 			setContainerField(&cfg.Container, key, val)
+		case "nvidia":
+			setNvidiaField(&cfg.Nvidia, key, val)
 		case "repo":
 			if repoInProgress != nil {
 				setRepoField(repoInProgress, key, val)
@@ -424,10 +450,29 @@ func setContainerField(ct *ContainerConfig, k, v string) {
 	}
 }
 
+func setNvidiaField(n *NvidiaConfig, k, v string) {
+	switch k {
+	case "enabled":
+		n.Enabled = boolean(v)
+	case "install_cuda":
+		n.InstallCUDA = boolean(v)
+	case "install_nvidia_settings":
+		n.InstallNVIDIASettings = boolean(v)
+	case "install_vaapi":
+		n.InstallVAAPI = boolean(v)
+	case "install_vulkan":
+		n.InstallVulkan = boolean(v)
+	case "blacklist_nouveau":
+		n.BlacklistNouveau = boolean(v)
+	case "enable_kms":
+		n.EnableKMS = boolean(v)
+	case "open_driver":
+		n.OpenDriver = boolean(v)
+	}
+}
+
 func setRepoField(r *RepoConfig, k, v string) {
 	switch k {
-	case "name":
-		r.Name = str(v)
 	case "enabled":
 		r.Enabled = boolean(v)
 	case "baseurl":
@@ -454,6 +499,13 @@ func (c *Config) applyDefaults() {
 	c.Boot.Bootloader = "grub2"
 	c.Boot.Timeout = 5
 	c.System.SELinux = "enforcing"
+	// NVIDIA defaults — sensible for a gaming/dev distro
+	c.Nvidia.InstallNVIDIASettings = true
+	c.Nvidia.InstallVAAPI = true
+	c.Nvidia.InstallVulkan = true
+	c.Nvidia.BlacklistNouveau = true
+	c.Nvidia.EnableKMS = true
+	c.Nvidia.OpenDriver = false // safe default — works on all cards
 }
 
 // ReadPackageList reads install.packages or remove.packages
