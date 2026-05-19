@@ -107,6 +107,15 @@ func (b *ISOBuilder) CheckTools() error {
 	}
 	ui.OK("podman: available")
 
+	// BIB requires rootful podman
+	if os.Getuid() != 0 {
+		ui.Newline()
+		ui.Warn("bootc-image-builder requires root — run with sudo:")
+		fmt.Fprintf(ui.Out, "\n  \033[96m  sudo legendaryos-builder build iso\033[0m\n\n")
+		return fmt.Errorf("must be root — run: sudo legendaryos-builder build iso")
+	}
+	ui.OK("Running as root")
+
 	for _, t := range optional {
 		if _, err := exec.LookPath(t); err != nil {
 			ui.Info("%s not found — will use podman-run mode", t)
@@ -239,17 +248,13 @@ func (b *ISOBuilder) buildViaPodman(sourceImage, outDir, finalPath, label, kicks
 		return fmt.Errorf("cannot write BIB config: %w", err)
 	}
 
-	// Mount project storage so BIB can find the already-pulled source image.
-	// PullImage() stored it in build/podman-storage/graph.
-	storageDir := b.paths.PodmanStorage
-
+	// As root (rootful podman), BIB uses /var/lib/containers/storage natively.
+	// The image was pulled there by PullImage() — no custom storage mount needed.
 	args := []string{
 		"run", "--rm",
 		"--privileged",
 		"--pull=newer",
-		// Project's isolated storage → BIB can find the source image here
-		"--volume", storageDir + ":/var/lib/containers/storage",
-		// Output goes here
+		// Output directory
 		"--volume", outDir + ":/output",
 		// osbuild needs device access
 		"--volume", "/dev:/dev",
@@ -372,12 +377,9 @@ func (b *ISOBuilder) VerifyISO(path string) error {
 }
 
 func (b *ISOBuilder) run(name string, args ...string) error {
-	return b.runEnv(b.podmanEnv(), name, args...)
-}
-
-func (b *ISOBuilder) runEnv(env []string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	cmd.Env = env
+	// As root: use native podman storage, no custom env needed
+	cmd.Env = os.Environ()
 	cmd.Stderr = os.Stderr
 	if b.verbose {
 		cmd.Stdout = os.Stdout
@@ -387,16 +389,6 @@ func (b *ISOBuilder) runEnv(env []string, name string, args ...string) error {
 	}
 	ui.OK("%s done", name)
 	return nil
-}
-
-// podmanEnv returns environment with isolated storage.conf set
-func (b *ISOBuilder) podmanEnv() []string {
-	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
-	storageDir := b.paths.PodmanStorage
-	return append(os.Environ(),
-		"CONTAINERS_STORAGE_CONF="+storageCfg,
-		"TMPDIR="+filepath.Join(storageDir, "tmp"),
-	)
 }
 
 func copyFile(src, dst string) error {
