@@ -376,6 +376,43 @@ func cmdBuildRelease(args []string) {
 	verb := *verbose || *vShort
 	ui.SmallBanner()
 
+	// ISO build requires root (BIB rootful podman).
+	// If not root, re-exec the entire process under sudo now,
+	// before doing any work — so the user only types the password once.
+	if os.Getuid() != 0 {
+		ui.Section("Sudo required for ISO build")
+		ui.Info("bootc-image-builder requires root access (rootful podman)")
+		ui.Info("Asking for sudo password now — used for the ISO phase")
+		ui.Newline()
+
+		// Re-exec self under sudo, passing all original arguments
+		self, err := os.Executable()
+		if err != nil {
+			ui.Fatal("cannot find own executable: %v", err)
+		}
+
+		// Build sudo command: sudo -E <self> build --release [args...]
+		sudoArgs := []string{"-E", self, "build", "--release"}
+		if *verbose || *vShort {
+			sudoArgs = append(sudoArgs, "--verbose")
+		}
+		if *noCache {
+			sudoArgs = append(sudoArgs, "--no-cache")
+		}
+
+		cmd := exec.Command("sudo", sudoArgs...)
+		cmd.Stdin  = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		// Pass current environment (including any GITHUB_TOKEN)
+		cmd.Env = os.Environ()
+
+		if err := cmd.Run(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	root := cwd()
 	cfg, err := config.Load(root)
 	if err != nil {
