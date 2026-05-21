@@ -211,6 +211,17 @@ func cmdBuildISO(args []string) {
 	root := cwd()
 	start := time.Now()
 
+	// Remove storage.conf if it exists and is owned by root — it was written
+	// by a previous cloud build (rootless) or iso build (root) and may block
+	// this run with "permission denied". ISO builder doesn't use storage.conf.
+	storageCfgPath := filepath.Join(root, "build", "storage.conf")
+	if _, err := os.Stat(storageCfgPath); err == nil {
+		if removeErr := os.Remove(storageCfgPath); removeErr != nil {
+			ui.Warn("Cannot remove old storage.conf: %v", removeErr)
+			ui.Warn("Try: sudo rm %s", storageCfgPath)
+		}
+	}
+
 	cfg, err := config.Load(root)
 	if err != nil {
 		ui.Fatal("%v", err)
