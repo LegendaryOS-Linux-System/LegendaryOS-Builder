@@ -214,6 +214,7 @@ func (b *ISOBuilder) buildViaBinary(sourceImage, outDir, finalPath, label, kicks
 		"build",
 		"--type", "iso",
 		"--output", outDir,
+		"--rootfs", b.rootfs(),
 	}
 	if bibCfgPath != "" {
 		args = append(args, "--config", bibCfgPath)
@@ -269,8 +270,14 @@ func (b *ISOBuilder) buildViaPodman(sourceImage, outDir, finalPath, label, kicks
 	// BIB container image
 	args = append(args, bibImage)
 
-	// BIB sub-command — no --iso-label, configured via config.toml
-	args = append(args, "build", "--type", "iso", "--output", "/output")
+	// BIB sub-command
+	// --rootfs xfs: required when BIB cannot auto-detect filesystem type from
+	// the bootc image metadata. Fedora uses XFS by default.
+	args = append(args, "build",
+		"--type", "iso",
+		"--output", "/output",
+		"--rootfs", b.rootfs(),
+	)
 	if bibCfgPath != "" {
 		args = append(args, "--config", "/config.toml")
 	}
@@ -403,6 +410,23 @@ func (b *ISOBuilder) run(name string, args ...string) error {
 	ui.OK("%s done", name)
 	return nil
 }
+
+// rootfs returns the filesystem type for BIB --rootfs flag.
+// Falls back to ext4 if not configured (most compatible).
+func (b *ISOBuilder) rootfs() string {
+	fs := b.cfg.Build.Filesystem
+	if fs == "" {
+		return "ext4"
+	}
+	// Validate — BIB supports: ext4, xfs, btrfs
+	switch fs {
+	case "ext4", "xfs", "btrfs":
+		return fs
+	default:
+		return "ext4"
+	}
+}
+
 
 func copyFile(src, dst string) error {
 	data, err := os.ReadFile(src)
