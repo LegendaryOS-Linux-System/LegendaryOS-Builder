@@ -85,6 +85,10 @@ type BuildConfig struct {
 	ISOFilename string
 	Jobs        int
 	CleanBuild  bool
+	// Filesystem type for the installed system partition
+	// Supported by BIB: ext4, xfs, btrfs
+	// Default: ext4 (most compatible, stable)
+	Filesystem  string
 }
 
 type ContainerConfig struct {
@@ -428,6 +432,8 @@ func setBuildField(b *BuildConfig, k, v string) {
 		b.Jobs = integer(v)
 	case "clean_build":
 		b.CleanBuild = boolean(v)
+	case "filesystem":
+		b.Filesystem = str(v)
 	}
 }
 
@@ -496,6 +502,7 @@ func (c *Config) applyDefaults() {
 	c.Build.CacheDir = "build/cache"
 	c.Build.Compression = "xz"
 	c.Build.Jobs = 4
+	c.Build.Filesystem = "ext4"
 	c.Boot.Bootloader = "grub2"
 	c.Boot.Timeout = 5
 	c.System.SELinux = "enforcing"
