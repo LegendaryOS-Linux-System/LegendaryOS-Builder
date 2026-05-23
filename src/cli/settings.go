@@ -140,6 +140,7 @@ func editAnaconda(cfg *config.Config) {
 func editBuild(cfg *config.Config) {
 	ui.Section("Build settings")
 	cfg.Build.Compression = askFieldChoice("Compression", cfg.Build.Compression, []string{"zstd", "xz", "gzip"})
+	cfg.Build.Filesystem  = askFieldChoice("Filesystem (for ISO)", cfg.Build.Filesystem, []string{"ext4", "xfs", "btrfs"})
 	j := askField("Parallel jobs", fmt.Sprintf("%d", cfg.Build.Jobs))
 	fmt.Sscanf(j, "%d", &cfg.Build.Jobs)
 	cfg.Build.ISOLabel    = askField("ISO label",    cfg.Build.ISOLabel)
@@ -236,6 +237,7 @@ iso_label    = %q
 iso_filename = %q
 jobs         = %d
 clean_build  = %s
+filesystem   = %q
 
 [container]
 enabled    = %s
@@ -264,7 +266,7 @@ bootc_mode = true
 		cfg.Anaconda.UserName, sl(cfg.Anaconda.UserGroups),
 
 		cfg.Build.Compression, cfg.Build.ISOLabel, cfg.Build.ISOFilename,
-		cfg.Build.Jobs, b(cfg.Build.CleanBuild),
+		cfg.Build.Jobs, b(cfg.Build.CleanBuild), cfg.Build.Filesystem,
 
 		b(cfg.Container.Enabled), cfg.Container.Registry, cfg.Container.Image,
 		cfg.Container.Tag, b(cfg.Container.Push), b(cfg.Container.SignImage),
