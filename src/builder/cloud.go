@@ -281,6 +281,17 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 	if cfg.System.Firewall {
 		line("RUN systemctl enable firewalld.service 2>/dev/null || true")
 	}
+
+	// os-release — BIB requires ID= field to be present.
+	// We append VARIANT fields but NEVER overwrite the base ID=fedora line.
+	// Also ensure ID= exists if somehow missing (defensive).
+	comment("── os-release — preserve ID=fedora required by bootc-image-builder ─")
+	line("RUN grep -q '^ID=' /etc/os-release || echo 'ID=fedora' >> /etc/os-release")
+	if cfg.Project.Name != "" {
+		variantID := strings.ToLower(strings.ReplaceAll(cfg.Project.Name, " ", "-"))
+		line("RUN grep -q '^VARIANT=' /etc/os-release || echo 'VARIANT=%s' >> /etc/os-release", cfg.Project.Name)
+		line("RUN grep -q '^VARIANT_ID=' /etc/os-release || echo 'VARIANT_ID=%s' >> /etc/os-release", variantID)
+	}
 	blank()
 
 	// Release mode
