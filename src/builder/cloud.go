@@ -113,8 +113,16 @@ func (b *CloudBuilder) GenerateContainerfile(platform string) error {
 	if err != nil {
 		return fmt.Errorf("cannot read remove.packages: %w", err)
 	}
+	flatpakPkgs, err := config.ReadPackageList(b.paths.FlatpakPkgs)
+	if err != nil {
+		return fmt.Errorf("cannot read flatpak.packages: %w", err)
+	}
+	flatpakRemove, err := config.ReadPackageList(b.paths.FlatpakRemovePkgs)
+	if err != nil {
+		return fmt.Errorf("cannot read flatpak.remove.packages: %w", err)
+	}
 
-	cf := b.renderContainerfile(installPkgs, removePkgs, platform)
+	cf := b.renderContainerfile(installPkgs, removePkgs, flatpakPkgs, flatpakRemove, platform)
 
 	cfPath := filepath.Join(b.paths.BuildDir, "Containerfile")
 	if err := os.WriteFile(cfPath, []byte(cf), 0644); err != nil {
@@ -128,15 +136,21 @@ func (b *CloudBuilder) GenerateContainerfile(platform string) error {
 		ui.Divider()
 	}
 	if len(installPkgs) > 0 {
-		ui.PackageListDisplay("Will install", installPkgs)
+		ui.PackageListDisplay("Will install (DNF)", installPkgs)
 	}
 	if len(removePkgs) > 0 {
-		ui.PackageListDisplay("Will remove", removePkgs)
+		ui.PackageListDisplay("Will remove (DNF)", removePkgs)
+	}
+	if len(flatpakPkgs) > 0 {
+		ui.PackageListDisplay("Will install (Flatpak)", flatpakPkgs)
+	}
+	if len(flatpakRemove) > 0 {
+		ui.PackageListDisplay("Will remove (Flatpak)", flatpakRemove)
 	}
 	return nil
 }
 
-func (b *CloudBuilder) renderContainerfile(install, remove []string, platform string) string {
+func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flatpakRemove []string, platform string) string {
 	cfg := b.cfg
 	base := fmt.Sprintf("quay.io/fedora/fedora-bootc:%d", cfg.Project.BaseVersion)
 
@@ -252,6 +266,40 @@ func (b *CloudBuilder) renderContainerfile(install, remove []string, platform st
 		line("    && for f in $(ls /tmp/los-scripts-after/*.pl  2>/dev/null | sort); do perl    \"$f\"; done \\")
 		line("    && for f in $(ls /tmp/los-scripts-after/*.rb  2>/dev/null | sort); do ruby    \"$f\"; done \\")
 		line("    && rm -rf /tmp/los-scripts-after")
+		blank()
+	}
+
+	// Flatpak — install from packages/flatpak.packages
+	// Flatpak apps are installed from Flathub into /var/lib/flatpak (system-wide)
+	// so they're available to all users after installation.
+	if len(flatpakInstall) > 0 || len(flatpakRemove) > 0 {
+		comment("── Flatpak (packages/flatpak.packages) ────────────────────────────")
+		// Ensure Flathub is added — flatpak must be installed via DNF first
+		line("RUN flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo 2>/dev/null || true")
+		blank()
+	}
+	if len(flatpakInstall) > 0 {
+		comment("── Flatpak install ──────────────────────────────────────────────────")
+		line("RUN flatpak install --system --noninteractive flathub \\")
+		for i, app := range flatpakInstall {
+			if i < len(flatpakInstall)-1 {
+				line("    %s \\", app)
+			} else {
+				line("    %s", app)
+			}
+		}
+		blank()
+	}
+	if len(flatpakRemove) > 0 {
+		comment("── Flatpak remove ───────────────────────────────────────────────────")
+		line("RUN flatpak uninstall --system --noninteractive \\")
+		for i, app := range flatpakRemove {
+			if i < len(flatpakRemove)-1 {
+				line("    %s \\", app)
+			} else {
+				line("    %s", app)
+			}
+		}
 		blank()
 	}
 
