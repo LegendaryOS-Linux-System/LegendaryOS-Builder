@@ -20,6 +20,7 @@ type Config struct {
 	Container ContainerConfig
 	Nvidia    NvidiaConfig
 	Repos     []RepoConfig
+	Branches  []BranchConfig
 }
 
 type ProjectConfig struct {
@@ -93,12 +94,32 @@ type BuildConfig struct {
 
 type ContainerConfig struct {
 	Enabled   bool
+	// Registry modes:
+	//   "custom" → ghcr.io/<user.toml name>/<image>
+	//   "repo"   → ghcr.io/<container.repo>  (specific GitHub repo)
+	//   other    → used as-is
 	Registry  string
 	Image     string
 	Tag       string
 	Push      bool
 	SignImage  bool
 	BootcMode bool
+	// Repo: specific GitHub org/repo, used when Registry = "repo"
+	// e.g. "LegendaryOS-Linux-System/legendaryos"
+	Repo      string
+}
+
+// BranchConfig defines an OS variant with a different desktop environment.
+// Branches share the base image but layer a different DE on top.
+type BranchConfig struct {
+	Name           string   // branch id: "gnome", "xfce", "kde"
+	Desktop        string   // DE: "gnome", "xfce", etc.
+	DisplayName    string   // "LegendaryOS GNOME Edition"
+	Tag            string   // OCI tag, auto-generated if empty
+	Description    string
+	ExtraPackages  []string // extra packages on top of base
+	RemovePackages []string // packages to strip from base
+	Enabled        bool
 }
 
 // NvidiaConfig controls proprietary NVIDIA driver installation in the ISO.
@@ -138,9 +159,11 @@ type RepoConfig struct {
 type Paths struct {
 	Root          string
 	Config        string
-	PackagesDir   string
-	InstallPkgs   string
-	RemovePkgs    string
+	PackagesDir       string
+	InstallPkgs       string
+	RemovePkgs        string
+	FlatpakPkgs       string
+	FlatpakRemovePkgs string
 	FilesDir      string
 	FilesAfter    string
 	FilesBefore   string
@@ -159,9 +182,11 @@ func GetPaths(root string) *Paths {
 	return &Paths{
 		Root:          root,
 		Config:        filepath.Join(root, "config.toml"),
-		PackagesDir:   filepath.Join(root, "packages"),
-		InstallPkgs:   filepath.Join(root, "packages", "install.packages"),
-		RemovePkgs:    filepath.Join(root, "packages", "remove.packages"),
+		PackagesDir:       filepath.Join(root, "packages"),
+		InstallPkgs:       filepath.Join(root, "packages", "install.packages"),
+		RemovePkgs:        filepath.Join(root, "packages", "remove.packages"),
+		FlatpakPkgs:       filepath.Join(root, "packages", "flatpak.packages"),
+		FlatpakRemovePkgs: filepath.Join(root, "packages", "flatpak.remove.packages"),
 		FilesDir:      filepath.Join(root, "files"),
 		FilesAfter:    filepath.Join(root, "files", "after"),
 		FilesBefore:   filepath.Join(root, "files", "before"),
@@ -193,7 +218,8 @@ func Load(root string) (*Config, error) {
 	cfg.applyDefaults()
 
 	section := ""
-	var repoInProgress *RepoConfig
+	var repoInProgress   *RepoConfig
+	var branchInProgress *BranchConfig
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
 
@@ -260,6 +286,10 @@ func Load(root string) (*Config, error) {
 		case "repo":
 			if repoInProgress != nil {
 				setRepoField(repoInProgress, key, val)
+			}
+		case "branch":
+			if branchInProgress != nil {
+				setBranchField(branchInProgress, key, val)
 			}
 		}
 	}
@@ -453,6 +483,8 @@ func setContainerField(ct *ContainerConfig, k, v string) {
 		ct.SignImage = boolean(v)
 	case "bootc_mode":
 		ct.BootcMode = boolean(v)
+	case "repo":
+		ct.Repo = str(v)
 	}
 }
 
@@ -474,6 +506,28 @@ func setNvidiaField(n *NvidiaConfig, k, v string) {
 		n.EnableKMS = boolean(v)
 	case "open_driver":
 		n.OpenDriver = boolean(v)
+	}
+}
+
+
+func setBranchField(b *BranchConfig, k, v string) {
+	switch k {
+	case "name":
+		b.Name = str(v)
+	case "desktop":
+		b.Desktop = str(v)
+	case "display_name":
+		b.DisplayName = str(v)
+	case "tag":
+		b.Tag = str(v)
+	case "description":
+		b.Description = str(v)
+	case "extra_packages":
+		b.ExtraPackages = strSlice(v)
+	case "remove_packages":
+		b.RemovePackages = strSlice(v)
+	case "enabled":
+		b.Enabled = boolean(v)
 	}
 }
 
