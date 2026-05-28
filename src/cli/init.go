@@ -88,7 +88,7 @@ func scaffold(dir string, a *initAnswers) {
 		filepath.Join(dir, ".github", "workflows"),
 	}
 
-	bar := ui.NewProgressBar(len(dirs)+6, "scaffolding")
+	bar := ui.NewProgressBar(len(dirs)+8, "scaffolding")
 	for i, d := range dirs {
 		bar.Set(i)
 		if err := os.MkdirAll(d, 0755); err != nil {
@@ -108,11 +108,19 @@ func scaffold(dir string, a *initAnswers) {
 
 	bar.Set(len(dirs) + 2)
 	write(paths.InstallPkgs, renderInstallPackages(a))
-	ui.OK("install.packages")
+	ui.OK("packages/install.packages")
 
 	bar.Set(len(dirs) + 3)
 	write(paths.RemovePkgs, defaultRemovePkgs)
-	ui.OK("remove.packages")
+	ui.OK("packages/remove.packages")
+
+	bar.Set(len(dirs) + 4)
+	write(paths.FlatpakPkgs, defaultFlatpakPkgs)
+	ui.OK("packages/flatpak.packages")
+
+	bar.Set(len(dirs) + 5)
+	write(paths.FlatpakRemovePkgs, defaultFlatpakRemovePkgs)
+	ui.OK("packages/flatpak.remove.packages")
 
 	bar.Set(len(dirs) + 4)
 	write(filepath.Join(paths.ScriptsBefore, "00-example.sh"), exampleScriptBefore)
@@ -164,9 +172,11 @@ func printTree(dir string) {
 		fmt.Sprintf("  %s/", base),
 		"  ├── config.toml            ← main configuration",
 		"  ├── packages/",
-		"  │   ├── install.packages   ← packages to install",
-		"  │   ├── remove.packages    ← packages to remove",
-		"  │   └── *.rpm              ← local RPM files (optional)",
+		"  │   ├── install.packages        ← DNF packages to install",
+		"  │   ├── remove.packages         ← DNF packages to remove",
+		"  │   ├── flatpak.packages        ← Flatpak apps to install (Flathub IDs)",
+		"  │   ├── flatpak.remove.packages ← Flatpak apps to remove",
+		"  │   └── *.rpm                   ← local .rpm files (optional)",
 		"  ├── files/",
 		"  │   ├── before/            ← overlay BEFORE package install",
 		"  │   └── after/             ← overlay AFTER package install",
@@ -339,6 +349,27 @@ func renderInstallPackages(a *initAnswers) string {
 	}
 	return sb.String()
 }
+
+var defaultFlatpakPkgs = `# packages/flatpak.packages — Flatpak apps to install (system-wide, from Flathub)
+# One Application ID per line, comments start with #
+# Find IDs at: https://flathub.org
+#
+# Przykłady / Examples:
+# com.visualstudio.code
+# com.spotify.Client
+# io.github.zen_browser.zen
+# com.discordapp.Discord
+# com.heroicgameslauncher.hgl
+`
+
+var defaultFlatpakRemovePkgs = `# packages/flatpak.remove.packages — Flatpak apps to remove
+# One Application ID per line, comments start with #
+# Useful for removing pre-installed Flatpaks from the base image
+#
+# Przykłady / Examples:
+# org.gnome.Maps
+# org.gnome.Weather
+`
 
 var defaultRemovePkgs = `# packages/remove.packages — packages to remove after install
 # One per line, # = comment
