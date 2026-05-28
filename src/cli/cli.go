@@ -506,18 +506,16 @@ func cmdBuildRelease(args []string) {
 	runSteps(isoSteps, cfg, start2, "", outPath)
 }
 
-// registryHost returns just the hostname part of the registry (e.g. "ghcr.io").
 func registryHost(cfg *config.Config, uc *config.UserConfig) string {
-	reg := cfg.Container.Registry
-	if reg == "" || reg == "custom" {
-		if uc != nil && uc.Registry() != "" {
-			return "ghcr.io"
-		}
+	switch cfg.Container.Registry {
+	case "", "custom":
 		return "ghcr.io"
+	case "repo":
+		return "ghcr.io"
+	default:
+		parts := strings.SplitN(cfg.Container.Registry, "/", 2)
+		return parts[0]
 	}
-	// extract host from full registry string
-	parts := strings.SplitN(reg, "/", 2)
-	return parts[0]
 }
 
 
@@ -579,7 +577,7 @@ func cmdValidate(_ []string) {
 			if err != nil {
 				return err
 			}
-			ui.Info("%d packages to install", len(pkgs))
+			ui.Info("%d packages to install (DNF)", len(pkgs))
 			return nil
 		}},
 		{"packages/remove.packages", func() error {
@@ -587,7 +585,23 @@ func cmdValidate(_ []string) {
 			if err != nil {
 				return err
 			}
-			ui.Info("%d packages to remove", len(pkgs))
+			ui.Info("%d packages to remove (DNF)", len(pkgs))
+			return nil
+		}},
+		{"packages/flatpak.packages", func() error {
+			pkgs, err := config.ReadPackageList(paths.FlatpakPkgs)
+			if err != nil {
+				return err
+			}
+			ui.Info("%d Flatpak apps to install", len(pkgs))
+			return nil
+		}},
+		{"packages/flatpak.remove.packages", func() error {
+			pkgs, err := config.ReadPackageList(paths.FlatpakRemovePkgs)
+			if err != nil {
+				return err
+			}
+			ui.Info("%d Flatpak apps to remove", len(pkgs))
 			return nil
 		}},
 		{"files/before/", func() error { ui.Info("%d files", countFiles(paths.FilesBefore)); return nil }},
@@ -653,11 +667,25 @@ func cmdInfo(_ []string) {
 	ui.Section("Container / bootc")
 	if cfg.Container.Enabled {
 		uc2, _ := config.LoadUser(root)
-		kv("Registry", cfg.Container.Registry)
+		kv("Registry mode", cfg.Container.Registry)
+		if cfg.Container.Repo != "" {
+			kv("Repo", cfg.Container.Repo)
+		}
 		kv("Image tag", imageTag(cfg, uc2))
 		kv("Auto push", fmt.Sprintf("%v", cfg.Container.Push))
 	} else {
 		ui.Info("Container build disabled")
+	}
+
+	if len(cfg.Branches) > 0 {
+		ui.Section("Branches")
+		for _, b := range cfg.Branches {
+			status := "disabled"
+			if b.Enabled {
+				status = "enabled"
+			}
+			ui.Info("[%s] %s  desktop=%s  (%s)", b.Name, b.DisplayName, b.Desktop, status)
+		}
 	}
 
 	ui.Section("Anaconda")
@@ -670,10 +698,16 @@ func cmdInfo(_ []string) {
 
 	ui.Section("Package Lists")
 	if pkgs, err := config.ReadPackageList(paths.InstallPkgs); err == nil && len(pkgs) > 0 {
-		ui.PackageListDisplay("Install", pkgs)
+		ui.PackageListDisplay("DNF Install", pkgs)
 	}
 	if pkgs, err := config.ReadPackageList(paths.RemovePkgs); err == nil && len(pkgs) > 0 {
-		ui.PackageListDisplay("Remove", pkgs)
+		ui.PackageListDisplay("DNF Remove", pkgs)
+	}
+	if pkgs, err := config.ReadPackageList(paths.FlatpakPkgs); err == nil && len(pkgs) > 0 {
+		ui.PackageListDisplay("Flatpak Install", pkgs)
+	}
+	if pkgs, err := config.ReadPackageList(paths.FlatpakRemovePkgs); err == nil && len(pkgs) > 0 {
+		ui.PackageListDisplay("Flatpak Remove", pkgs)
 	}
 	ui.Newline()
 }
@@ -705,13 +739,33 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	img := cfg.Container.Image
 	tag := cfg.Container.Tag
 
-	if reg == "" || reg == "custom" {
+	switch reg {
+	case "", "custom":
+		// ghcr.io/<user.toml github.name>/<image>
+		if uc != nil && uc.Registry() != "" {
+			reg = uc.Registry()
+		} else {
+			reg = "ghcr.io/myorg"
+		}
+	case "repo":
+		// Specific GitHub repo: ghcr.io/<org>/<repo>
+		// config.toml: [container] repo = "LegendaryOS-Linux-System/legendaryos"
+		if cfg.Container.Repo != "" {
+			if tag == "" {
+				tag = cfg.Project.Version
+			}
+			if tag == "" {
+				tag = "latest"
+			}
+			return strings.ToLower(fmt.Sprintf("ghcr.io/%s:%s", cfg.Container.Repo, tag))
+		}
 		if uc != nil && uc.Registry() != "" {
 			reg = uc.Registry()
 		} else {
 			reg = "ghcr.io/myorg"
 		}
 	}
+
 	if img == "" {
 		img = strings.ReplaceAll(cfg.Project.Name, " ", "-")
 	}
@@ -721,9 +775,7 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	if tag == "" {
 		tag = "latest"
 	}
-	// OCI spec: repository name must be lowercase
-	full := fmt.Sprintf("%s/%s:%s", reg, img, tag)
-	return strings.ToLower(full)
+	return strings.ToLower(fmt.Sprintf("%s/%s:%s", reg, img, tag))
 }
 
 // askGitHubToken prompts the user for a GitHub token interactively.
