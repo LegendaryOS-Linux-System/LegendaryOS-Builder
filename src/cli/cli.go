@@ -118,7 +118,6 @@ func cmdBuild(args []string) {
 	case "iso":
 		cmdBuildISO(args[1:])
 	case "--release", "release":
-		// build --release = build cloud --push + build iso sequentially
 		cmdBuildRelease(args[1:])
 	default:
 		ui.SmallBanner()
@@ -158,7 +157,6 @@ func cmdBuildCloud(args []string) {
 	paths := config.GetPaths(root)
 	tag := imageTag(cfg, uc)
 
-	// Ask for GitHub token — required for ghcr.io push/pull
 	token := askGitHubToken(uc)
 
 	ui.Section("Cloud Build")
@@ -176,8 +174,8 @@ func cmdBuildCloud(args []string) {
 	steps := []namedStep{
 		{"Pre-scripts (host)",     func() error { return b.RunPreScripts() }},
 		{"Validate project",       b.Validate},
-		{"Prepare build dirs",     b.PrepareDirs},                                                         // ← storage.conf created here
-		{"Registry login",         func() error { return b.RegistryLogin(registryHost(cfg, uc), uc.GitHub.Name, token) }}, // ← after PrepareDirs
+		{"Prepare build dirs",     b.PrepareDirs},
+		{"Registry login",         func() error { return b.RegistryLogin(registryHost(cfg, uc), uc.GitHub.Name, token) }},
 		{"Copy repos",             b.CopyRepos},
 		{"Generate Containerfile", func() error { return b.GenerateContainerfile(*platform) }},
 		{"podman build",           func() error { return b.PodmanBuild(tag, *noCache) }},
@@ -211,9 +209,6 @@ func cmdBuildISO(args []string) {
 	root := cwd()
 	start := time.Now()
 
-	// Remove storage.conf if it exists and is owned by root — it was written
-	// by a previous cloud build (rootless) or iso build (root) and may block
-	// this run with "permission denied". ISO builder doesn't use storage.conf.
 	storageCfgPath := filepath.Join(root, "build", "storage.conf")
 	if _, err := os.Stat(storageCfgPath); err == nil {
 		if removeErr := os.Remove(storageCfgPath); removeErr != nil {
@@ -262,7 +257,6 @@ func cmdBuildISO(args []string) {
 		ksPath = filepath.Join(paths.BuildDir, "anaconda.ks")
 	}
 
-	// Token needed to pull the private image from ghcr.io
 	token := askGitHubToken(uc)
 
 	ui.Section("ISO Build")
@@ -320,31 +314,92 @@ func cmdInit(args []string) {
 
 func cmdClean(args []string) {
 	fs := flag.NewFlagSet("clean", flag.ExitOnError)
-	all := fs.Bool("all", false, "Remove entire build/ dir including cache")
+	all := fs.Bool("all", false, "Remove entire build/ dir including cache (uses sudo for root-owned files)")
 	fs.Parse(args) //nolint
 
 	ui.SmallBanner()
 	ui.Section("Clean")
 
 	paths := config.GetPaths(cwd())
-	targets := []string{paths.OutputDir}
-	if *all {
-		targets = []string{paths.BuildDir}
-	}
-	for _, t := range targets {
-		if _, err := os.Stat(t); os.IsNotExist(err) {
-			ui.Info("Already clean: %s", t)
-			continue
+
+	if !*all {
+		// Zwykłe czyszczenie — tylko build/output/
+		targets := []string{paths.OutputDir}
+		for _, t := range targets {
+			if _, err := os.Stat(t); os.IsNotExist(err) {
+				ui.Info("Already clean: %s", t)
+				continue
+			}
+			if err := os.RemoveAll(t); err != nil {
+				// Prawdopodobnie pliki należą do roota (z poprzedniego sudo build iso)
+				// Spróbuj przez sudo rm -rf
+				ui.Warn("Permission denied, retrying with sudo: %s", t)
+				if sudoErr := sudoRemove(t); sudoErr != nil {
+					ui.Fatal("Cannot remove %s: %v", t, sudoErr)
+				}
+			}
+			ui.OK("Removed: %s", t)
 		}
-		if err := os.RemoveAll(t); err != nil {
-			ui.Fatal("Cannot remove %s: %v", t, err)
-		}
-		ui.OK("Removed: %s", t)
+		os.MkdirAll(paths.OutputDir, 0755) //nolint
+		os.MkdirAll(paths.CacheDir, 0755)  //nolint
+		ui.OK("Clean complete")
+		ui.Newline()
+		return
 	}
-	os.MkdirAll(paths.OutputDir, 0755) //nolint
-	os.MkdirAll(paths.CacheDir, 0755)  //nolint
-	ui.OK("Clean complete")
+
+	// ── clean --all ───────────────────────────────────────────────────────────
+	// Całe build/ może zawierać pliki root:root (podman-storage, iso-work,
+	// output/bootiso/install.iso) — usuwamy przez sudo żeby mieć pewność.
+
+	buildDir := paths.BuildDir
+
+	if _, err := os.Stat(buildDir); os.IsNotExist(err) {
+		ui.Info("Already clean: %s", buildDir)
+	} else {
+		ui.Info("Removing build dir (sudo): %s", buildDir)
+		if err := sudoRemove(buildDir); err != nil {
+			ui.Fatal("Cannot remove %s: %v", buildDir, err)
+		}
+		ui.OK("Removed: %s", buildDir)
+	}
+
+	// Odtwórz puste katalogi po czyszczeniu
+	for _, d := range []string{paths.BuildDir, paths.OutputDir, paths.CacheDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			ui.Warn("Cannot recreate %s: %v", d, err)
+		}
+	}
+	ui.OK("Build directories recreated")
+
+	// ── podman system prune ───────────────────────────────────────────────────
+	// Usuwa nieużywane obrazy, kontenery, wolumeny i sieci z podman storage.
+	// Musi działać jako root (rootful podman używany przez BIB).
 	ui.Newline()
+	ui.Info("Running: sudo podman system prune -a --volumes --force")
+	pruneCmd := exec.Command("sudo", "podman", "system", "prune", "-a", "--volumes", "--force")
+	pruneCmd.Stdout = os.Stdout
+	pruneCmd.Stderr = os.Stderr
+	pruneCmd.Stdin  = os.Stdin
+	if err := pruneCmd.Run(); err != nil {
+		// Nie traktuj jako fatal — prune może nie mieć nic do usunięcia
+		ui.Warn("podman system prune returned error (may be harmless): %v", err)
+	} else {
+		ui.OK("podman system prune done")
+	}
+
+	ui.Newline()
+	ui.OK("Full clean complete")
+	ui.Newline()
+}
+
+// sudoRemove usuwa katalog lub plik przez "sudo rm -rf <path>".
+// Używane gdy pliki należą do roota (build iso uruchamiane przez sudo).
+func sudoRemove(path string) error {
+	cmd := exec.Command("sudo", "rm", "-rf", path)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin  = os.Stdin
+	return cmd.Run()
 }
 
 // ── setup ─────────────────────────────────────────────────────────────────────
@@ -376,7 +431,6 @@ func cmdSetup(args []string) {
 }
 
 // cmdBuildRelease runs build cloud --push then build iso sequentially.
-// This is the full release pipeline: container → registry → bootable ISO.
 func cmdBuildRelease(args []string) {
 	fs := flag.NewFlagSet("build --release", flag.ExitOnError)
 	verbose := fs.Bool("verbose", false, "Verbose output")
@@ -387,22 +441,17 @@ func cmdBuildRelease(args []string) {
 	verb := *verbose || *vShort
 	ui.SmallBanner()
 
-	// ISO build requires root (BIB rootful podman).
-	// If not root, re-exec the entire process under sudo now,
-	// before doing any work — so the user only types the password once.
 	if os.Getuid() != 0 {
 		ui.Section("Sudo required for ISO build")
 		ui.Info("bootc-image-builder requires root access (rootful podman)")
 		ui.Info("Asking for sudo password now — used for the ISO phase")
 		ui.Newline()
 
-		// Re-exec self under sudo, passing all original arguments
 		self, err := os.Executable()
 		if err != nil {
 			ui.Fatal("cannot find own executable: %v", err)
 		}
 
-		// Build sudo command: sudo -E <self> build --release [args...]
 		sudoArgs := []string{"-E", self, "build", "--release"}
 		if *verbose || *vShort {
 			sudoArgs = append(sudoArgs, "--verbose")
@@ -415,7 +464,6 @@ func cmdBuildRelease(args []string) {
 		cmd.Stdin  = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		// Pass current environment (including any GITHUB_TOKEN)
 		cmd.Env = os.Environ()
 
 		if err := cmd.Run(); err != nil {
@@ -434,7 +482,6 @@ func cmdBuildRelease(args []string) {
 		uc = &config.UserConfig{}
 	}
 
-	// Ask for token once — reused for both cloud and iso
 	token := askGitHubToken(uc)
 
 	tag := imageTag(cfg, uc)
@@ -447,17 +494,16 @@ func cmdBuildRelease(args []string) {
 	ui.Info("Image    : %s", tag)
 	ui.Newline()
 
-	// ── Phase 1: build cloud ─────────────────────────────────────────────────
 	ui.Section("Phase 1 — Cloud Build")
 	start1 := time.Now()
 	paths := config.GetPaths(root)
-	b := builder.NewCloud(cfg, paths, verb, true) // release=true
+	b := builder.NewCloud(cfg, paths, verb, true)
 
 	cloudSteps := []namedStep{
 		{"Pre-scripts (host)",     func() error { return b.RunPreScripts() }},
 		{"Validate project",       b.Validate},
-		{"Prepare build dirs",     b.PrepareDirs},                                          // ← storage.conf here
-		{"Registry login",         func() error { return b.RegistryLogin(reg, username, token) }}, // ← after PrepareDirs
+		{"Prepare build dirs",     b.PrepareDirs},
+		{"Registry login",         func() error { return b.RegistryLogin(reg, username, token) }},
 		{"Copy repos",             b.CopyRepos},
 		{"Generate Containerfile", func() error { return b.GenerateContainerfile("linux/amd64") }},
 		{"podman build",           func() error { return b.PodmanBuild(tag, *noCache) }},
@@ -465,7 +511,6 @@ func cmdBuildRelease(args []string) {
 	}
 	runSteps(cloudSteps, cfg, start1, tag, "")
 
-	// ── Phase 2: build iso ───────────────────────────────────────────────────
 	ui.Section("Phase 2 — ISO Build")
 	start2 := time.Now()
 
@@ -484,7 +529,7 @@ func cmdBuildRelease(args []string) {
 		ksPath = filepath.Join(paths.BuildDir, "anaconda.ks")
 	}
 
-	bISO := builder.NewISO(cfg, paths, verb, true) // release=true
+	bISO := builder.NewISO(cfg, paths, verb, true)
 
 	isoSteps := []namedStep{
 		{"Validate project",   bISO.Validate},
@@ -517,8 +562,6 @@ func registryHost(cfg *config.Config, uc *config.UserConfig) string {
 		return parts[0]
 	}
 }
-
-
 
 func cmdValidate(_ []string) {
 	ui.SmallBanner()
@@ -560,7 +603,6 @@ func cmdValidate(_ []string) {
 				return fmt.Errorf("unknown environment %q", env)
 			}
 			if env == "cosmic" {
-				// Check that cosmic.repo exists
 				cosmicRepoPath := filepath.Join(paths.ReposDir, "cosmic.repo")
 				if _, err := os.Stat(cosmicRepoPath); os.IsNotExist(err) {
 					ui.Warn("repos/cosmic.repo not found — COSMIC packages won't install")
@@ -732,8 +774,6 @@ func cwd() string {
 	return d
 }
 
-// imageTag computes the full OCI image tag.
-// If config.toml has registry = "custom", reads the registry from user.toml.
 func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	reg := cfg.Container.Registry
 	img := cfg.Container.Image
@@ -741,15 +781,12 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 
 	switch reg {
 	case "", "custom":
-		// ghcr.io/<user.toml github.name>/<image>
 		if uc != nil && uc.Registry() != "" {
 			reg = uc.Registry()
 		} else {
 			reg = "ghcr.io/myorg"
 		}
 	case "repo":
-		// Specific GitHub repo: ghcr.io/<org>/<repo>
-		// config.toml: [container] repo = "LegendaryOS-Linux-System/legendaryos"
 		if cfg.Container.Repo != "" {
 			if tag == "" {
 				tag = cfg.Project.Version
@@ -778,21 +815,15 @@ func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	return strings.ToLower(fmt.Sprintf("%s/%s:%s", reg, img, tag))
 }
 
-// askGitHubToken prompts the user for a GitHub token interactively.
-// If user.toml already has a token stored, asks whether to use it.
-// Returns the token string.
 func askGitHubToken(uc *config.UserConfig) string {
-	// Check env first — CI/CD sets GITHUB_TOKEN
 	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
 		ui.Info("Token: using $GITHUB_TOKEN from environment")
 		return t
 	}
-	// Check user.toml stored token
 	if uc != nil && uc.GitHub.Token != "" {
 		ui.Info("Token: found in user.toml")
 		return uc.GitHub.Token
 	}
-	// Interactive prompt — hide input
 	ui.Newline()
 	fmt.Fprintf(ui.Out, "  \033[93m⚠\033[0m  GitHub token required for registry access\n")
 	fmt.Fprintf(ui.Out, "  \033[90mGet one at: https://github.com/settings/tokens\033[0m\n")
@@ -800,7 +831,6 @@ func askGitHubToken(uc *config.UserConfig) string {
 	fmt.Fprintf(ui.Out, "  \033[90m(input hidden)\033[0m\n\n")
 	fmt.Fprintf(ui.Out, "  \033[96m›\033[0m \033[97;1mGitHub Token\033[0m: ")
 
-	// Try to disable echo for password input
 	token := readSecret()
 	fmt.Fprintln(ui.Out)
 	if token == "" {
@@ -809,19 +839,15 @@ func askGitHubToken(uc *config.UserConfig) string {
 	return token
 }
 
-// readSecret reads a line from stdin without echoing (best-effort).
 func readSecret() string {
-	// Try syscall-based no-echo
 	b, err := readNoEcho()
 	if err == nil {
 		return strings.TrimSpace(string(b))
 	}
-	// Fallback: normal read (token will be visible)
 	var line string
 	fmt.Scanln(&line)
 	return strings.TrimSpace(line)
 }
-
 
 func countFiles(dir string) int {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
