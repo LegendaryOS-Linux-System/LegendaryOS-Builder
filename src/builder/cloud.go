@@ -1,5 +1,3 @@
-// src/builder/cloud.go
-
 package builder
 
 import (
