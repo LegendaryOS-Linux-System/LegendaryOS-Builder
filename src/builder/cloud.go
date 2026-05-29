@@ -1,3 +1,5 @@
+// src/builder/cloud.go
+
 package builder
 
 import (
@@ -14,13 +16,13 @@ import (
 // CloudBuilder builds an OCI bootc container image using podman.
 //
 // Pipeline:
-//   1. Validate project
-//   2. Prepare build/ dirs
-//   3. Copy repos/ into build context
-//   4. Generate Containerfile  (from config + packages/install.packages + files/ + scripts/)
-//   5. podman build --tag <registry/image:tag>
-//   6. (optional) podman push
-//   7. (optional) cosign sign
+//  1. Validate project
+//  2. Prepare build/ dirs
+//  3. Copy repos/ into build context
+//  4. Generate Containerfile  (from config + packages/install.packages + files/ + scripts/)
+//  5. podman build --tag <registry/image:tag>
+//  6. (optional) podman push
+//  7. (optional) cosign sign
 type CloudBuilder struct {
 	cfg     *config.Config
 	paths   *config.Paths
@@ -270,11 +272,8 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 	}
 
 	// Flatpak — install from packages/flatpak.packages
-	// Flatpak apps are installed from Flathub into /var/lib/flatpak (system-wide)
-	// so they're available to all users after installation.
 	if len(flatpakInstall) > 0 || len(flatpakRemove) > 0 {
 		comment("── Flatpak (packages/flatpak.packages) ────────────────────────────")
-		// Ensure Flathub is added — flatpak must be installed via DNF first
 		line("RUN flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo 2>/dev/null || true")
 		blank()
 	}
@@ -330,14 +329,27 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		line("RUN systemctl enable firewalld.service 2>/dev/null || true")
 	}
 
-	// os-release — BIB requires ID= field to be present.
-	// We append VARIANT fields but NEVER overwrite the base ID=fedora line.
-	// Also ensure ID= exists if somehow missing (defensive).
-	comment("── os-release — preserve ID=fedora required by bootc-image-builder ─")
+	// ── os-release — BIB requires both ID= and VERSION_ID= ──────────────────
+	//
+	// bootc-image-builder manifest generation fails with:
+	//   "missing VERSION_ID in os-release"
+	// when the field is absent from /etc/os-release inside the container image.
+	//
+	// The base fedora-bootc image ships with VERSION_ID set, but custom
+	// layers or in-container edits can accidentally strip it.
+	// We defensively ensure all required fields are present:
+	//   ID=          (distro id, must stay "fedora" for BIB)
+	//   VERSION_ID=  (numeric version, e.g. "44"  — BIB reads this for osbuild)
+	//
+	// We also append VARIANT fields so the installed OS self-identifies
+	// as LegendaryOS rather than plain Fedora.
+	comment("── os-release — ensure ID= and VERSION_ID= required by bootc-image-builder ─")
+	comment("  BIB manifest generation fails if either field is missing.")
 	line("RUN grep -q '^ID=' /etc/os-release || echo 'ID=fedora' >> /etc/os-release")
+	line("RUN grep -q '^VERSION_ID=' /etc/os-release || echo 'VERSION_ID=%d' >> /etc/os-release", cfg.Project.BaseVersion)
 	if cfg.Project.Name != "" {
 		variantID := strings.ToLower(strings.ReplaceAll(cfg.Project.Name, " ", "-"))
-		line("RUN grep -q '^VARIANT=' /etc/os-release || echo 'VARIANT=%s' >> /etc/os-release", cfg.Project.Name)
+		line("RUN grep -q '^VARIANT=' /etc/os-release    || echo 'VARIANT=%s'    >> /etc/os-release", cfg.Project.Name)
 		line("RUN grep -q '^VARIANT_ID=' /etc/os-release || echo 'VARIANT_ID=%s' >> /etc/os-release", variantID)
 	}
 	blank()
@@ -359,14 +371,13 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 }
 
 // RegistryLogin logs into the OCI registry using podman login.
-// Uses the isolated storage so credentials don't touch global podman config.
 func (b *CloudBuilder) RegistryLogin(registry, username, token string) error {
 	if token == "" {
 		ui.Info("No token — skipping registry login")
 		return nil
 	}
 	if username == "" {
-		username = "token" // ghcr.io accepts any username with a PAT
+		username = "token"
 	}
 	ui.Info("Logging into %s as %s", registry, username)
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
@@ -378,18 +389,6 @@ func (b *CloudBuilder) RegistryLogin(registry, username, token string) error {
 	)
 }
 
-
-//
-// Storage isolation:
-//   All podman layers, images and tmp files are written to
-//   build/podman-storage  (inside the project directory).
-//   This means you can put the project on any disk with enough space
-//   and podman will never touch /var/tmp or ~/.local/share/containers.
-//
-//   Implementation: we pass --storage-driver=overlay and set
-//   CONTAINERS_STORAGE_CONF + XDG_DATA_HOME env vars so this instance
-//   of podman uses a completely separate storage root without touching
-//   the user's global podman configuration.
 func (b *CloudBuilder) PodmanBuild(tag string, noCache bool) error {
 	cfPath := filepath.Join(b.paths.BuildDir, "Containerfile")
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
@@ -415,7 +414,6 @@ func (b *CloudBuilder) PodmanBuild(tag string, noCache bool) error {
 	return b.runEnv(env, "podman", args...)
 }
 
-// PodmanPush pushes the built image using the same isolated storage.
 func (b *CloudBuilder) PodmanPush(tag string) error {
 	ui.Info("Pushing: %s", tag)
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
@@ -423,7 +421,6 @@ func (b *CloudBuilder) PodmanPush(tag string) error {
 	return b.runEnv(env, "podman", "push", tag)
 }
 
-// CosignSign signs the pushed image with cosign keyless signing.
 func (b *CloudBuilder) CosignSign(tag string) error {
 	ui.Info("Signing with cosign: %s", tag)
 	return b.runEnv(os.Environ(), "cosign", "sign", "--yes", tag)
@@ -453,9 +450,6 @@ func hasDir(path string) bool {
 }
 
 // RunPreScripts executes scripts/pre/ on the HOST before any build step.
-// These run with full host access — useful for checking dependencies,
-// pre-pulling images, validating environment, setting up secrets etc.
-// Order: alphabetical. Supported: .sh .py .pl .rb
 func (b *CloudBuilder) RunPreScripts() error {
 	if !hasDir(b.paths.ScriptsPre) {
 		ui.Info("No scripts/pre/ directory — skipping")
