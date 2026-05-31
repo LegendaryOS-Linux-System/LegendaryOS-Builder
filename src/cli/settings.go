@@ -63,6 +63,7 @@ func showSettingsMenu(cfg *config.Config) {
 		fmt.Fprintf(ui.Out, "  \033[96m[%s]\033[0m \033[97;1m%-22s\033[0m \033[90m%s\033[0m\n", n, section, val)
 	}
 
+	// version shown as-is — symbolic or semver
 	row("1", "Project",   fmt.Sprintf("%s %s  (Fedora %d)", cfg.Project.Name, cfg.Project.Version, cfg.Project.BaseVersion))
 	row("2", "System",    fmt.Sprintf("host=%s  locale=%s  tz=%s", cfg.System.Hostname, cfg.System.Locale, cfg.System.Timezone))
 	row("3", "Desktop",   fmt.Sprintf("env=%s  display=%s", cfg.Desktop.Environment, cfg.Desktop.DisplayServer))
@@ -80,11 +81,20 @@ func showSettingsMenu(cfg *config.Config) {
 
 func editProject(cfg *config.Config) {
 	ui.Section("Project settings")
-	cfg.Project.Name        = askField("Name",         cfg.Project.Name)
-	cfg.Project.Version     = askField("Version",      cfg.Project.Version)
-	cfg.Project.Description = askField("Description",  cfg.Project.Description)
-	cfg.Project.Author      = askField("Author",       cfg.Project.Author)
-	cfg.Project.License     = askField("License",      cfg.Project.License)
+	cfg.Project.Name        = askField("Name",        cfg.Project.Name)
+	cfg.Project.Description = askField("Description", cfg.Project.Description)
+	cfg.Project.Author      = askField("Author",      cfg.Project.Author)
+	cfg.Project.License     = askField("License",     cfg.Project.License)
+
+	// Version — accept both semver and symbolic labels
+	fmt.Fprintln(ui.Out)
+	fmt.Fprintf(ui.Out, "  \033[90mVersion can be a semver number (e.g. 1.2.3) or a symbolic label:\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90msymbolic: stable | beta | alpha | nightly | latest | edge | dev\033[0m\n")
+	cfg.Project.Version = askField("Version", cfg.Project.Version)
+	if config.IsSymbolicVersion(cfg.Project.Version) {
+		ui.Info("Using symbolic version label: %q", cfg.Project.Version)
+	}
+
 	v := askField("Fedora base version", fmt.Sprintf("%d", cfg.Project.BaseVersion))
 	fmt.Sscanf(v, "%d", &cfg.Project.BaseVersion)
 	ui.OK("Project updated (not saved yet — press [s])")
@@ -105,7 +115,7 @@ func editDesktop(cfg *config.Config) {
 	ui.Section("Desktop settings")
 	cfg.Desktop.Environment   = askFieldChoice("Environment",    cfg.Desktop.Environment,   []string{"gnome", "kde", "xfce", "cinnamon", "mate", "lxqt", "cosmic", "none"})
 	cfg.Desktop.DisplayServer = askFieldChoice("Display server", cfg.Desktop.DisplayServer, []string{"wayland", "x11", "both"})
-	cfg.Desktop.AutoLogin     = askFieldBool("Auto login",        cfg.Desktop.AutoLogin)
+	cfg.Desktop.AutoLogin     = askFieldBool("Auto login",       cfg.Desktop.AutoLogin)
 	if cfg.Desktop.AutoLogin {
 		cfg.Desktop.AutoLoginUser = askField("Auto login user", cfg.Desktop.AutoLoginUser)
 	}
@@ -117,23 +127,30 @@ func editContainer(cfg *config.Config) {
 	cfg.Container.Enabled  = askFieldBool("Enabled",  cfg.Container.Enabled)
 	cfg.Container.Registry = askField("Registry", cfg.Container.Registry)
 	cfg.Container.Image    = askField("Image",    cfg.Container.Image)
-	cfg.Container.Tag      = askField("Tag",      cfg.Container.Tag)
-	cfg.Container.Push     = askFieldBool("Auto push after build", cfg.Container.Push)
-	cfg.Container.SignImage = askFieldBool("Sign image with cosign", cfg.Container.SignImage)
+
+	fmt.Fprintln(ui.Out)
+	fmt.Fprintf(ui.Out, "  \033[90mTag can be a semver number or symbolic label (stable, nightly, …)\033[0m\n")
+	cfg.Container.Tag = askField("Tag", cfg.Container.Tag)
+
+	cfg.Container.Push      = askFieldBool("Auto push after build", cfg.Container.Push)
+	cfg.Container.SignImage  = askFieldBool("Sign image with cosign", cfg.Container.SignImage)
 	ui.OK("Container updated (not saved yet — press [s])")
 }
 
 func editAnaconda(cfg *config.Config) {
 	ui.Section("Anaconda installer settings")
-	cfg.Anaconda.Enabled         = askFieldBool("Enabled",          cfg.Anaconda.Enabled)
-	cfg.Anaconda.ProductName     = askField("Product name",          cfg.Anaconda.ProductName)
-	cfg.Anaconda.ProductVersion  = askField("Product version",       cfg.Anaconda.ProductVersion)
-	cfg.Anaconda.WebUI           = askFieldBool("WebUI",             cfg.Anaconda.WebUI)
-	cfg.Anaconda.DefaultLang     = askField("Default language",      cfg.Anaconda.DefaultLang)
-	cfg.Anaconda.DefaultKeyboard = askField("Default keyboard",      cfg.Anaconda.DefaultKeyboard)
-	cfg.Anaconda.DefaultTimezone = askField("Default timezone",      cfg.Anaconda.DefaultTimezone)
+	cfg.Anaconda.Enabled          = askFieldBool("Enabled",          cfg.Anaconda.Enabled)
+	cfg.Anaconda.ProductName      = askField("Product name",          cfg.Anaconda.ProductName)
+
+	fmt.Fprintf(ui.Out, "  \033[90mProduct version — semver or symbolic (stable, beta, …)\033[0m\n")
+	cfg.Anaconda.ProductVersion   = askField("Product version",       cfg.Anaconda.ProductVersion)
+
+	cfg.Anaconda.WebUI            = askFieldBool("WebUI",             cfg.Anaconda.WebUI)
+	cfg.Anaconda.DefaultLang      = askField("Default language",      cfg.Anaconda.DefaultLang)
+	cfg.Anaconda.DefaultKeyboard  = askField("Default keyboard",      cfg.Anaconda.DefaultKeyboard)
+	cfg.Anaconda.DefaultTimezone  = askField("Default timezone",      cfg.Anaconda.DefaultTimezone)
 	cfg.Anaconda.RootPasswordLock = askFieldBool("Lock root password", cfg.Anaconda.RootPasswordLock)
-	cfg.Anaconda.UserName        = askField("Default user",          cfg.Anaconda.UserName)
+	cfg.Anaconda.UserName         = askField("Default user",          cfg.Anaconda.UserName)
 	ui.OK("Anaconda updated (not saved yet — press [s])")
 }
 
@@ -143,9 +160,9 @@ func editBuild(cfg *config.Config) {
 	cfg.Build.Filesystem  = askFieldChoice("Filesystem (for ISO)", cfg.Build.Filesystem, []string{"ext4", "xfs", "btrfs"})
 	j := askField("Parallel jobs", fmt.Sprintf("%d", cfg.Build.Jobs))
 	fmt.Sscanf(j, "%d", &cfg.Build.Jobs)
-	cfg.Build.ISOLabel    = askField("ISO label",    cfg.Build.ISOLabel)
-	cfg.Build.ISOFilename = askField("ISO filename (empty = auto)", cfg.Build.ISOFilename)
-	cfg.Build.CleanBuild  = askFieldBool("Clean build", cfg.Build.CleanBuild)
+	cfg.Build.ISOLabel    = askField("ISO label",                    cfg.Build.ISOLabel)
+	cfg.Build.ISOFilename = askField("ISO filename (empty = auto)",  cfg.Build.ISOFilename)
+	cfg.Build.CleanBuild  = askFieldBool("Clean build",              cfg.Build.CleanBuild)
 	ui.OK("Build updated (not saved yet — press [s])")
 }
 
@@ -179,12 +196,22 @@ func renderConfigFromStruct(cfg *config.Config) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 
+	// version channel comment — shown when a symbolic label is used
+	verComment := ""
+	if config.IsSymbolicVersion(cfg.Project.Version) {
+		verComment = fmt.Sprintf("  # channel: %s → use git tags for semver releases", cfg.Project.Version)
+	}
+
 	return fmt.Sprintf(`# config.toml — saved by legendaryos-builder settings
 # Backup of previous config saved to config.toml.bak
+#
+# version / tag fields accept:
+#   • semver numbers : 1.2.3
+#   • symbolic labels: stable | beta | alpha | nightly | latest | edge | dev
 
 [project]
 name         = %q
-version      = %q
+version      = %q%s
 description  = %q
 author       = %q
 license      = %q
@@ -237,19 +264,23 @@ iso_label    = %q
 iso_filename = %q
 jobs         = %d
 clean_build  = %s
+# System filesystem type used by bootc-image-builder
+# Options: ext4 | xfs | btrfs   (default: ext4)
 filesystem   = %q
 
 [container]
 enabled    = %s
 registry   = %q
 image      = %q
+# tag accepts semver or symbolic label: stable | beta | nightly | latest | edge | dev
 tag        = %q
 push       = %s
 sign_image = %s
 bootc_mode = true
 `,
-		cfg.Project.Name, cfg.Project.Version, cfg.Project.Description,
-		cfg.Project.Author, cfg.Project.License, cfg.Project.BaseVersion,
+		cfg.Project.Name, cfg.Project.Version, verComment,
+		cfg.Project.Description, cfg.Project.Author, cfg.Project.License,
+		cfg.Project.BaseVersion,
 
 		cfg.System.Hostname, cfg.System.Locale, cfg.System.Timezone,
 		cfg.System.Keyboard, cfg.System.SELinux, b(cfg.System.Firewall),
@@ -313,7 +344,6 @@ func askFieldChoice(label, current string, choices []string) string {
 		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n >= 1 && n <= len(choices) {
 			return choices[n-1]
 		}
-		// allow typing the value directly
 		for _, c := range choices {
 			if strings.EqualFold(v, c) {
 				return c
