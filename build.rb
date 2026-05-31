@@ -1,67 +1,162 @@
-BINARY      := legendaryos-builder
-VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.4.0")
-COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE  := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-LDFLAGS     := -s -w \
-               -X main.Version=$(VERSION) \
-               -X main.Commit=$(COMMIT) \
-               -X main.BuildDate=$(BUILD_DATE)
-GOFLAGS     := -trimpath
-DIST_DIR    := dist
+require "open3"
+require "fileutils"
+require "time"
 
-.PHONY: all build release install clean test fmt vet tidy help
+BINARY    = "legendaryos-builder"
+DIST_DIR  = "dist"
+INSTALL   = "/usr/local/bin/#{BINARY}"
 
-all: build
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-# ── Development build ─────────────────────────────────────────────────────────
-build:
-	@printf "  \033[96m⬡\033[0m  Building \033[97;1m$(BINARY)\033[0m $(VERSION) ...\n"
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) .
-	@printf "  \033[92m✓\033[0m  $(BINARY) ready\n"
+def cyan(s)    = "\033[96m#{s}\033[0m"
+def green(s)   = "\033[92m#{s}\033[0m"
+def yellow(s)  = "\033[93m#{s}\033[0m"
+def bold(s)    = "\033[97;1m#{s}\033[0m"
+def gray(s)    = "\033[90m#{s}\033[0m"
 
-# ── Release build — linux/amd64 ───────────────────────────────────────────────
-release: fmt vet
-	@printf "  \033[96m⬡\033[0m  Building release binary (linux/amd64) ...\n"
-	@mkdir -p $(DIST_DIR)
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-		go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST_DIR)/$(BINARY) .
-	@cd $(DIST_DIR) && tar -czf $(BINARY)-linux-amd64.tar.gz $(BINARY)
-	@cd $(DIST_DIR) && sha256sum $(BINARY)-linux-amd64.tar.gz > checksums.sha256
-	@printf "  \033[92m✓\033[0m  $(DIST_DIR)/$(BINARY)-linux-amd64.tar.gz\n"
-	@cat $(DIST_DIR)/checksums.sha256
+def info(msg)  = $stderr.puts("  #{cyan("⬡")}  #{bold(msg)}")
+def ok(msg)    = $stderr.puts("  #{green("✓")}  #{msg}")
+def warn(msg)  = $stderr.puts("  #{yellow("⚠")}  #{msg}")
 
-# ── Install to /usr/local/bin ─────────────────────────────────────────────────
-install: build
-	@printf "  \033[96m⬡\033[0m  Installing to /usr/local/bin/$(BINARY) ...\n"
-	@sudo install -m 0755 $(BINARY) /usr/local/bin/$(BINARY)
-	@printf "  \033[92m✓\033[0m  Installed\n"
+def run!(cmd, env: {})
+  merged = ENV.to_h.merge(env.transform_keys(&:to_s))
+  out, err, status = Open3.capture3(merged, cmd)
+  $stdout.print(out) unless out.empty?
+  $stderr.print(err) unless err.empty?
+  abort "Command failed: #{cmd}" unless status.success?
+end
 
-fmt:
-	go fmt ./...
+def shell_capture(cmd)
+  out, _err, status = Open3.capture3(cmd)
+  status.success? ? out.strip : nil
+end
 
-vet:
-	go vet ./...
+# ── Version metadata (mirrors Makefile logic) ─────────────────────────────────
 
-tidy:
-	go mod tidy
+def version
+  shell_capture("git describe --tags --always --dirty 2>/dev/null") || "v0.4.0"
+end
 
-test:
-	go test ./... -v -count=1
+def commit
+  shell_capture("git rev-parse --short HEAD 2>/dev/null") || "unknown"
+end
 
-clean:
-	@printf "  \033[96m⬡\033[0m  Cleaning ...\n"
-	@rm -f $(BINARY)
-	@rm -rf $(DIST_DIR)
-	@printf "  \033[92m✓\033[0m  Clean\n"
+def build_date
+  Time.now.utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+end
 
-help:
-	@printf "\n  \033[96;1m⬡ LegendaryOS Builder — Makefile\033[0m\n\n"
-	@printf "  \033[97;1mTargets:\033[0m\n"
-	@printf "    \033[96mmake\033[0m             build legendaryos-builder binary\n"
-	@printf "    \033[96mmake release\033[0m     build dist/legendaryos-builder-linux-amd64.tar.gz\n"
-	@printf "    \033[96mmake install\033[0m     sudo install to /usr/local/bin\n"
-	@printf "    \033[96mmake fmt\033[0m         go fmt\n"
-	@printf "    \033[96mmake vet\033[0m         go vet\n"
-	@printf "    \033[96mmake tidy\033[0m        go mod tidy\n"
-	@printf "    \033[96mmake test\033[0m        run tests\n"
-	@printf "    \033[96mmake clean\033[0m       remove binary and dist/\n\n"
+def ldflags
+  v, c, d = version, commit, build_date
+  "-s -w -X main.Version=#{v} -X main.Commit=#{c} -X main.BuildDate=#{d}"
+end
+
+GOFLAGS = "-trimpath"
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+
+def task_build
+  info "Building #{BINARY} #{version} ..."
+  run! "go build #{GOFLAGS} -ldflags \"#{ldflags}\" -o #{BINARY} ."
+  ok "#{BINARY} ready"
+end
+
+def task_release
+  task_fmt
+  task_vet
+  info "Building release binary (linux/amd64) ..."
+  FileUtils.mkdir_p(DIST_DIR)
+  out_bin = File.join(DIST_DIR, BINARY)
+  run!(
+    "go build #{GOFLAGS} -ldflags \"#{ldflags}\" -o #{out_bin} .",
+    env: { GOOS: "linux", GOARCH: "amd64", CGO_ENABLED: "0" }
+  )
+  tarball = "#{BINARY}-linux-amd64.tar.gz"
+  Dir.chdir(DIST_DIR) do
+    run! "tar -czf #{tarball} #{BINARY}"
+    checksum = shell_capture("sha256sum #{tarball}")
+    File.write("checksums.sha256", checksum + "\n")
+    ok "#{DIST_DIR}/#{tarball}"
+    $stderr.puts gray("  " + checksum.to_s)
+  end
+end
+
+def task_install
+  task_build
+  info "Installing to #{INSTALL} ..."
+  run! "sudo install -m 0755 #{BINARY} #{INSTALL}"
+  ok "Installed"
+end
+
+def task_fmt
+  info "go fmt ..."
+  run! "go fmt ./..."
+  ok "fmt done"
+end
+
+def task_vet
+  info "go vet ..."
+  run! "go vet ./..."
+  ok "vet done"
+end
+
+def task_tidy
+  info "go mod tidy ..."
+  run! "go mod tidy"
+  ok "tidy done"
+end
+
+def task_test
+  info "go test ./... ..."
+  run! "go test ./... -v -count=1"
+  ok "tests passed"
+end
+
+def task_clean
+  info "Cleaning ..."
+  FileUtils.rm_f(BINARY)
+  FileUtils.rm_rf(DIST_DIR)
+  ok "Clean"
+end
+
+def task_help
+  $stderr.puts ""
+  $stderr.puts "  #{cyan("⬡")} #{bold("LegendaryOS Builder — build.rb")}"
+  $stderr.puts ""
+  $stderr.puts "  #{bold("Usage:")} ruby build.rb [task]"
+  $stderr.puts ""
+  rows = [
+    ["(no args) / build", "build #{BINARY} binary"],
+    ["release",           "build dist/#{BINARY}-linux-amd64.tar.gz + checksum"],
+    ["install",           "sudo install to #{INSTALL}"],
+    ["fmt",               "go fmt ./..."],
+    ["vet",               "go vet ./..."],
+    ["tidy",              "go mod tidy"],
+    ["test",              "run tests"],
+    ["clean",             "remove binary and #{DIST_DIR}/"],
+    ["help",              "show this help"],
+  ]
+  rows.each do |cmd, desc|
+    $stderr.puts "    #{cyan("ruby build.rb %-16s" % cmd)}  #{gray(desc)}"
+  end
+  $stderr.puts ""
+end
+
+# ── Dispatch ──────────────────────────────────────────────────────────────────
+
+task = ARGV[0] || "build"
+
+case task
+when "build"    then task_build
+when "release"  then task_release
+when "install"  then task_install
+when "fmt"      then task_fmt
+when "vet"      then task_vet
+when "tidy"     then task_tidy
+when "test"     then task_test
+when "clean"    then task_clean
+when "help", "--help", "-h" then task_help
+else
+  warn "Unknown task: #{task.inspect}"
+  task_help
+  exit 1
+end
