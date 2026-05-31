@@ -32,7 +32,16 @@ func runInitWizard(dir string) {
 
 	a := &initAnswers{}
 	a.name        = ui.AskDefault("Project name", "MyOS")
+
+	// Version — guide user to semver or symbolic label
+	fmt.Fprintln(ui.Out)
+	fmt.Fprintf(ui.Out, "  \033[90mVersion — enter a semver number (e.g. 0.1.0) or a symbolic label:\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90m  stable | beta | alpha | nightly | latest | edge | dev\033[0m\n")
 	a.version     = ui.AskDefault("Version", "0.1.0")
+	if config.IsSymbolicVersion(a.version) {
+		ui.Info("Symbolic version label %q — will be used as the OCI tag", a.version)
+	}
+
 	a.description = ui.AskDefault("Description", "A custom Fedora-based OS")
 	a.author      = ui.AskDefault("Author", "")
 
@@ -134,7 +143,6 @@ func scaffold(dir string, a *initAnswers) {
 	write(filepath.Join(paths.ReposDir, "example.repo"), exampleRepo)
 	ui.OK("repos/example.repo")
 
-	// Auto-generate cosmic.repo if COSMIC desktop was selected
 	if a.desktop == "cosmic" {
 		write(filepath.Join(paths.ReposDir, "cosmic.repo"), cosmicRepo)
 		ui.OK("repos/cosmic.repo  (COSMIC desktop repo)")
@@ -153,7 +161,7 @@ func scaffold(dir string, a *initAnswers) {
 
 	fmt.Fprintln(ui.Out)
 	ui.Section("Next steps")
-	ui.Info("1. Edit config.toml")
+	ui.Info("1. Edit config.toml  (version can be semver or: stable | beta | nightly | …)")
 	ui.Info("2. Add packages to packages/install.packages")
 	ui.Info("3. Drop .rpm files into packages/")
 	ui.Info("4. Add files to files/after/ and files/before/")
@@ -215,14 +223,28 @@ func renderConfig(a *initAnswers) string {
 		}
 		return "false"
 	}
+
+	// Add a comment when a symbolic version label is used
+	versionComment := ""
+	if config.IsSymbolicVersion(a.version) {
+		versionComment = fmt.Sprintf("  # channel label — use git tags for semver releases")
+	}
+
 	return fmt.Sprintf(`# ╔══════════════════════════════════════════════════════════════╗
 # ║              LegendaryOS Builder — config.toml              ║
 # ╚══════════════════════════════════════════════════════════════╝
+#
+# version / tag fields accept:
+#   • semver numbers  : 1.2.3
+#   • symbolic labels : stable | beta | alpha | nightly | latest | edge | dev
+#
+# Symbolic labels are passed through to OCI tags, ISO filenames and
+# the Anaconda kickstart as-is.
 
 # ── Project ───────────────────────────────────────────────────────────────────
 [project]
 name         = %q
-version      = %q
+version      = %q%s
 description  = %q
 author       = %q
 license      = "GPL-2.0"
@@ -261,6 +283,7 @@ timeout     = 5
 enabled            = %s
 kickstart_embed    = true
 product_name       = %q
+# product_version mirrors project.version — can be semver or symbolic label
 product_version    = %q
 webui              = true
 hide_shell         = false
@@ -280,18 +303,24 @@ iso_label    = %q
 iso_filename = ""
 jobs         = 4
 clean_build  = false
+# System filesystem type used by bootc-image-builder
+# Options: ext4 | xfs | btrfs   (default: ext4)
+filesystem   = "ext4"
 
 # ── Container / bootc ─────────────────────────────────────────────────────────
 [container]
 enabled    = %s
 registry   = %q
 image      = %q
+# tag mirrors project.version — accepts symbolic labels (stable, nightly, …)
 tag        = %q
 push       = false
 sign_image = false
 bootc_mode = true
 `,
-		a.name, a.version, a.description, a.author,
+		a.name,
+		a.version, versionComment,
+		a.description, a.author,
 		a.hostname, a.locale, a.timezone, a.keyboard,
 		a.desktop,
 		boolStr(a.anaconda), a.name, a.version,
@@ -313,25 +342,23 @@ func renderInstallPackages(a *initAnswers) string {
 	if a.desktop != "none" && a.desktop != "" {
 		switch a.desktop {
 		case "cosmic":
-			// COSMIC desktop from System76 — no DNF group, individual packages
-			// Requires repos/cosmic.repo (COPR: nickel-org/cosmic-desktop)
 			sb.WriteString("\n# ── COSMIC Desktop (System76) ──────────────────────────────────\n")
 			sb.WriteString("# Requires repos/cosmic.repo — see notes below\n")
 			for _, p := range []string{
-				"cosmic-session",        // Wayland compositor + session manager
-				"cosmic-settings",       // System settings app
-				"cosmic-files",          // File manager
-				"cosmic-terminal",       // Terminal emulator
-				"cosmic-launcher",       // App launcher
-				"cosmic-panel",          // Top panel
-				"cosmic-dock",           // Bottom dock
-				"cosmic-applets",        // Panel applets (network, battery, etc.)
-				"cosmic-bg",             // Wallpaper manager
-				"cosmic-notifications",  // Notification daemon
-				"cosmic-screenshot",     // Screenshot tool
-				"cosmic-edit",           // Text editor
-				"cosmic-store",          // App store (Flatpak frontend)
-				"cosmic-greeter",        // Login screen (greeter)
+				"cosmic-session",
+				"cosmic-settings",
+				"cosmic-files",
+				"cosmic-terminal",
+				"cosmic-launcher",
+				"cosmic-panel",
+				"cosmic-dock",
+				"cosmic-applets",
+				"cosmic-bg",
+				"cosmic-notifications",
+				"cosmic-screenshot",
+				"cosmic-edit",
+				"cosmic-store",
+				"cosmic-greeter",
 				"xdg-user-dirs",
 				"pipewire",
 				"pipewire-alsa",
@@ -341,7 +368,6 @@ func renderInstallPackages(a *initAnswers) string {
 				sb.WriteString(p + "\n")
 			}
 		default:
-			// Standard Fedora desktop groups: @gnome-desktop-environment, @kde-desktop-environment etc.
 			sb.WriteString(fmt.Sprintf("\n# ── %s Desktop ──────────────────────────────────────────────────\n",
 				strings.Title(a.desktop)))
 			sb.WriteString(fmt.Sprintf("@%s-desktop-environment\n", a.desktop))
@@ -354,7 +380,7 @@ var defaultFlatpakPkgs = `# packages/flatpak.packages — Flatpak apps to instal
 # One Application ID per line, comments start with #
 # Find IDs at: https://flathub.org
 #
-# Przykłady / Examples:
+# Examples:
 # com.visualstudio.code
 # com.spotify.Client
 # io.github.zen_browser.zen
@@ -366,7 +392,7 @@ var defaultFlatpakRemovePkgs = `# packages/flatpak.remove.packages — Flatpak a
 # One Application ID per line, comments start with #
 # Useful for removing pre-installed Flatpaks from the base image
 #
-# Przykłady / Examples:
+# Examples:
 # org.gnome.Maps
 # org.gnome.Weather
 `
@@ -411,7 +437,6 @@ echo "    Version : ${LEGENDARYOS_VERSION:-unknown}"
 var cosmicRepo = `# repos/cosmic.repo
 # COSMIC Desktop — System76
 # COPR: nickel-org/cosmic-desktop (community port for Fedora)
-# Oficjalne repozytorium COSMIC na Fedorę via COPR
 
 [copr:copr.fedorainfracloud.org:nickel-org:cosmic-desktop]
 name=COSMIC Desktop (Fedora $releasever)
@@ -456,17 +481,16 @@ func renderGHAWorkflow(a *initAnswers) string {
 	if imgName == "" {
 		imgName = strings.ToLower(strings.ReplaceAll(a.name, " ", "-"))
 	}
-	// GitHub Actions expressions like ${{ }} are built via string concat
-	// to avoid collision with Go's fmt.Sprintf % verbs.
+
 	ex := func(s string) string { return "${{" + " " + s + " }}" }
 
-	notPR      := ex("github.event_name") + " != 'pull_request'"
-	actor      := ex("github.actor")
-	token      := ex("secrets.GITHUB_TOKEN")
-	githubRef  := ex("GITHUB_REF")
-	refName    := ex("GITHUB_REF_NAME")
-	tagFull    := ex("steps.tag.outputs.full")
-	ifNotPR    := "if: " + notPR
+	notPR     := ex("github.event_name") + " != 'pull_request'"
+	actor     := ex("github.actor")
+	token     := ex("secrets.GITHUB_TOKEN")
+	githubRef := ex("GITHUB_REF")
+	refName   := ex("GITHUB_REF_NAME")
+	tagFull   := ex("steps.tag.outputs.full")
+	ifNotPR   := "if: " + notPR
 
 	var b strings.Builder
 	w := func(s string) { b.WriteString(s + "\n") }
@@ -503,8 +527,6 @@ func renderGHAWorkflow(a *initAnswers) string {
 	w("      - name: Checkout")
 	w("        uses: actions/checkout@v4")
 	w("")
-	w("      # ── Download legendaryos binary ───────────────────────────────────")
-	w("      # Change this URL to wherever you host your built binary.")
 	w("      - name: Download legendaryos-builder")
 	w("        run: |")
 	w("          curl -fsSL \\")
@@ -540,12 +562,6 @@ func renderGHAWorkflow(a *initAnswers) string {
 	w("      - name: Validate")
 	w("        run: legendaryos validate")
 	w("")
-	w("      # ── Build container image ─────────────────────────────────────────")
-	w("      # legendaryos build cloud does:")
-	w("      #   1. Reads config.toml + packages/install.packages + files/ + scripts/ + repos/")
-	w("      #   2. Generates build/Containerfile")
-	w("      #   3. Runs: podman build --tag <image> --file build/Containerfile .")
-	w("      #   4. (if --push) Runs: podman push <image>")
 	w("      - name: Build cloud image")
 	w("        run: |")
 	w("          PUSH_FLAG=\"\"")
