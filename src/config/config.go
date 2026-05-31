@@ -23,9 +23,29 @@ type Config struct {
 	Branches  []BranchConfig
 }
 
+// VersionTag represents a version string that can be either a semver number
+// ("0.1.0", "44") or a symbolic label ("stable", "beta", "nightly", "latest").
+//
+// Symbolic labels are stored as-is and passed through to OCI tags, ISO
+// filenames, Containerfile labels, and the Anaconda kickstart.
+//
+// Reserved symbolic labels (case-insensitive):
+//   stable   — production release channel
+//   beta     — pre-release / testing channel
+//   alpha    — early development channel
+//   nightly  — automated nightly builds
+//   latest   — always points to the newest image
+//   edge     — rolling / experimental
+//   dev      — local development builds
+//
+// Any other string (including semver like "1.2.3") is accepted verbatim.
+type VersionTag = string
+
 type ProjectConfig struct {
 	Name        string
-	Version     string
+	// Version accepts both semver ("0.1.0") and symbolic labels ("stable",
+	// "beta", "nightly", "latest", "edge", "dev", etc.).
+	Version     VersionTag
 	Description string
 	Author      string
 	License     string
@@ -64,7 +84,8 @@ type AnacondaConfig struct {
 	Enabled          bool
 	KickstartEmbed   bool
 	ProductName      string
-	ProductVersion   string
+	// ProductVersion mirrors project.version — symbolic labels work here too.
+	ProductVersion   VersionTag
 	WebUI            bool
 	HideShell        bool
 	CustomLogo       string
@@ -86,63 +107,53 @@ type BuildConfig struct {
 	ISOFilename string
 	Jobs        int
 	CleanBuild  bool
-	// Filesystem type for the installed system partition
+	// Filesystem type for the installed system partition.
 	// Supported by BIB: ext4, xfs, btrfs
 	// Default: ext4 (most compatible, stable)
-	Filesystem  string
+	Filesystem string
 }
 
 type ContainerConfig struct {
-	Enabled   bool
+	Enabled bool
 	// Registry modes:
-	//   "custom" → ghcr.io/<user.toml name>/<image>
+	//   "custom" → ghcr.io/<user.toml github.name>/<image>
 	//   "repo"   → ghcr.io/<container.repo>  (specific GitHub repo)
 	//   other    → used as-is
 	Registry  string
 	Image     string
-	Tag       string
+	// Tag mirrors project.version — accepts symbolic labels ("stable", "nightly").
+	Tag       VersionTag
 	Push      bool
-	SignImage  bool
+	SignImage bool
 	BootcMode bool
-	// Repo: specific GitHub org/repo, used when Registry = "repo"
+	// Repo: specific GitHub org/repo used when Registry = "repo"
 	// e.g. "LegendaryOS-Linux-System/legendaryos"
-	Repo      string
+	Repo string
 }
 
 // BranchConfig defines an OS variant with a different desktop environment.
-// Branches share the base image but layer a different DE on top.
 type BranchConfig struct {
-	Name           string   // branch id: "gnome", "xfce", "kde"
-	Desktop        string   // DE: "gnome", "xfce", etc.
-	DisplayName    string   // "LegendaryOS GNOME Edition"
-	Tag            string   // OCI tag, auto-generated if empty
+	Name           string
+	Desktop        string
+	DisplayName    string
+	// Tag accepts symbolic labels ("stable-gnome", "nightly-kde", …).
+	Tag            VersionTag
 	Description    string
-	ExtraPackages  []string // extra packages on top of base
-	RemovePackages []string // packages to strip from base
+	ExtraPackages  []string
+	RemovePackages []string
 	Enabled        bool
 }
 
 // NvidiaConfig controls proprietary NVIDIA driver installation in the ISO.
-// Drivers are installed via %post in the Anaconda kickstart using akmod-nvidia
-// from RPM Fusion. They are NOT installed in the bootc container image.
 type NvidiaConfig struct {
-	// Enabled: install NVIDIA proprietary drivers during ISO installation
-	Enabled bool
-	// InstallCUDA: also install CUDA toolkit (large, optional)
-	InstallCUDA bool
-	// InstallNVIDIASettings: install nvidia-settings GUI tool
+	Enabled               bool
+	InstallCUDA           bool
 	InstallNVIDIASettings bool
-	// InstallVAAPI: install nvidia-vaapi-driver for hardware video decode
-	InstallVAAPI bool
-	// InstallVulkan: install nvidia Vulkan ICD (usually included in driver)
-	InstallVulkan bool
-	// Blacklist nouveau: prevent open-source nouveau from loading
-	BlacklistNouveau bool
-	// KMS: enable kernel mode setting for NVIDIA (required for Wayland)
-	EnableKMS bool
-	// OpenDriver: use nvidia-open (open-source kernel module, Turing+ only)
-	// Set to false for Maxwell/Pascal/Volta or if unsure
-	OpenDriver bool
+	InstallVAAPI          bool
+	InstallVulkan         bool
+	BlacklistNouveau      bool
+	EnableKMS             bool
+	OpenDriver            bool
 }
 
 type RepoConfig struct {
@@ -155,54 +166,79 @@ type RepoConfig struct {
 	Priority int
 }
 
-// Paths holds all well-known project directory paths
+// Paths holds all well-known project directory paths.
 type Paths struct {
-	Root          string
-	Config        string
+	Root              string
+	Config            string
 	PackagesDir       string
 	InstallPkgs       string
 	RemovePkgs        string
 	FlatpakPkgs       string
 	FlatpakRemovePkgs string
-	FilesDir      string
-	FilesAfter    string
-	FilesBefore   string
-	ScriptsDir    string
-	ScriptsPre    string // run on HOST before anything else
-	ScriptsBefore string // run inside container BEFORE dnf install
-	ScriptsAfter  string // run inside container AFTER dnf install
-	ReposDir      string
-	BuildDir      string
-	CacheDir      string
-	OutputDir     string
-	PodmanStorage string // isolated podman storage inside build/
+	FilesDir          string
+	FilesAfter        string
+	FilesBefore       string
+	ScriptsDir        string
+	ScriptsPre        string
+	ScriptsBefore     string
+	ScriptsAfter      string
+	ReposDir          string
+	BuildDir          string
+	CacheDir          string
+	OutputDir         string
+	PodmanStorage     string
 }
 
 func GetPaths(root string) *Paths {
 	return &Paths{
-		Root:          root,
-		Config:        filepath.Join(root, "config.toml"),
+		Root:              root,
+		Config:            filepath.Join(root, "config.toml"),
 		PackagesDir:       filepath.Join(root, "packages"),
 		InstallPkgs:       filepath.Join(root, "packages", "install.packages"),
 		RemovePkgs:        filepath.Join(root, "packages", "remove.packages"),
 		FlatpakPkgs:       filepath.Join(root, "packages", "flatpak.packages"),
 		FlatpakRemovePkgs: filepath.Join(root, "packages", "flatpak.remove.packages"),
-		FilesDir:      filepath.Join(root, "files"),
-		FilesAfter:    filepath.Join(root, "files", "after"),
-		FilesBefore:   filepath.Join(root, "files", "before"),
-		ScriptsDir:    filepath.Join(root, "scripts"),
-		ScriptsPre:    filepath.Join(root, "scripts", "pre"),
-		ScriptsBefore: filepath.Join(root, "scripts", "before"),
-		ScriptsAfter:  filepath.Join(root, "scripts", "after"),
-		ReposDir:      filepath.Join(root, "repos"),
-		BuildDir:      filepath.Join(root, "build"),
-		CacheDir:      filepath.Join(root, "build", "cache"),
-		OutputDir:     filepath.Join(root, "build", "output"),
-		PodmanStorage: filepath.Join(root, "build", "podman-storage"),
+		FilesDir:          filepath.Join(root, "files"),
+		FilesAfter:        filepath.Join(root, "files", "after"),
+		FilesBefore:       filepath.Join(root, "files", "before"),
+		ScriptsDir:        filepath.Join(root, "scripts"),
+		ScriptsPre:        filepath.Join(root, "scripts", "pre"),
+		ScriptsBefore:     filepath.Join(root, "scripts", "before"),
+		ScriptsAfter:      filepath.Join(root, "scripts", "after"),
+		ReposDir:          filepath.Join(root, "repos"),
+		BuildDir:          filepath.Join(root, "build"),
+		CacheDir:          filepath.Join(root, "build", "cache"),
+		OutputDir:         filepath.Join(root, "build", "output"),
+		PodmanStorage:     filepath.Join(root, "build", "podman-storage"),
 	}
 }
 
-// Load parses config.toml using a hand-rolled TOML parser (stdlib only)
+// ── Symbolic version helpers ──────────────────────────────────────────────────
+
+// symbolicVersions lists all recognised symbolic channel labels.
+var symbolicVersions = map[string]bool{
+	"stable":  true,
+	"beta":    true,
+	"alpha":   true,
+	"nightly": true,
+	"latest":  true,
+	"edge":    true,
+	"dev":     true,
+}
+
+// IsSymbolicVersion reports whether v is a reserved symbolic label.
+func IsSymbolicVersion(v string) bool {
+	return symbolicVersions[strings.ToLower(v)]
+}
+
+// ResolveVersion returns v unchanged — symbolic labels and semver are both
+// valid version strings. The function exists so call-sites can document intent
+// without extra logic.
+func ResolveVersion(v string) string { return v }
+
+// ── Parser ────────────────────────────────────────────────────────────────────
+
+// Load parses config.toml using a hand-rolled TOML parser (stdlib only).
 func Load(root string) (*Config, error) {
 	paths := GetPaths(root)
 	if _, err := os.Stat(paths.Config); os.IsNotExist(err) {
@@ -227,34 +263,46 @@ func Load(root string) (*Config, error) {
 		lineNum++
 		line := strings.TrimSpace(scanner.Text())
 
-		// skip blank lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		// section header
+		// [[ array table ]]
 		if strings.HasPrefix(line, "[[") && strings.HasSuffix(line, "]]") {
 			name := strings.TrimSuffix(strings.TrimPrefix(line, "[["), "]]")
 			if repoInProgress != nil {
 				cfg.Repos = append(cfg.Repos, *repoInProgress)
 			}
-			if name == "repo" {
+			if branchInProgress != nil {
+				cfg.Branches = append(cfg.Branches, *branchInProgress)
+				branchInProgress = nil
+			}
+			switch name {
+			case "repo":
 				r := &RepoConfig{Enabled: true, GPGCheck: true, Priority: 99}
 				repoInProgress = r
+			case "branch":
+				b := &BranchConfig{Enabled: true}
+				branchInProgress = b
 			}
 			section = name
 			continue
 		}
+
+		// [ table ]
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			if repoInProgress != nil {
 				cfg.Repos = append(cfg.Repos, *repoInProgress)
 				repoInProgress = nil
 			}
+			if branchInProgress != nil {
+				cfg.Branches = append(cfg.Branches, *branchInProgress)
+				branchInProgress = nil
+			}
 			section = strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
 			continue
 		}
 
-		// key = value
 		eq := strings.Index(line, "=")
 		if eq < 0 {
 			continue
@@ -293,39 +341,41 @@ func Load(root string) (*Config, error) {
 			}
 		}
 	}
+
+	// flush any trailing inline tables
 	if repoInProgress != nil {
 		cfg.Repos = append(cfg.Repos, *repoInProgress)
 	}
+	if branchInProgress != nil {
+		cfg.Branches = append(cfg.Branches, *branchInProgress)
+	}
+
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading config.toml: %w", err)
 	}
-	// Auto-detect license from LICENSE file if not specified in config
 	if cfg.Project.License == "" {
 		cfg.Project.License = DetectLicense(root)
 	}
+
+	// Mirror project.version → anaconda.product_version if not set explicitly
+	if cfg.Anaconda.ProductVersion == "" {
+		cfg.Anaconda.ProductVersion = cfg.Project.Version
+	}
+	// Mirror project.version → container.tag if not set explicitly
+	if cfg.Container.Tag == "" {
+		cfg.Container.Tag = cfg.Project.Version
+	}
+
 	return cfg, nil
 }
 
 // ── Field setters ─────────────────────────────────────────────────────────────
 
-func str(v string) string {
-	v = strings.Trim(v, `"'`)
-	return v
-}
-
-func boolean(v string) bool {
-	v = strings.ToLower(strings.Trim(v, `"'`))
-	return v == "true" || v == "yes" || v == "1"
-}
-
-func integer(v string) int {
-	v = strings.Trim(v, `"'`)
-	n, _ := strconv.Atoi(v)
-	return n
-}
+func str(v string) string       { return strings.Trim(v, `"'`) }
+func boolean(v string) bool     { v = strings.ToLower(strings.Trim(v, `"'`)); return v == "true" || v == "yes" || v == "1" }
+func integer(v string) int      { n, _ := strconv.Atoi(strings.Trim(v, `"'`)); return n }
 
 func strSlice(v string) []string {
-	// supports: ["a", "b"] or ["a","b"]
 	v = strings.Trim(v, "[]")
 	if v == "" {
 		return nil
@@ -343,233 +393,154 @@ func strSlice(v string) []string {
 
 func setProjectField(p *ProjectConfig, k, v string) {
 	switch k {
-	case "name":
-		p.Name = str(v)
-	case "version":
-		p.Version = str(v)
-	case "description":
-		p.Description = str(v)
-	case "author":
-		p.Author = str(v)
-	case "license":
-		p.License = str(v)
-	case "base_distro":
-		p.BaseDistro = str(v)
-	case "base_version":
-		p.BaseVersion = integer(v)
-	case "arch":
-		p.Arch = str(v)
+	case "name":         p.Name = str(v)
+	case "version":      p.Version = str(v)
+	case "description":  p.Description = str(v)
+	case "author":       p.Author = str(v)
+	case "license":      p.License = str(v)
+	case "base_distro":  p.BaseDistro = str(v)
+	case "base_version": p.BaseVersion = integer(v)
+	case "arch":         p.Arch = str(v)
 	}
 }
 
 func setSystemField(s *SystemConfig, k, v string) {
 	switch k {
-	case "hostname":
-		s.Hostname = str(v)
-	case "locale":
-		s.Locale = str(v)
-	case "timezone":
-		s.Timezone = str(v)
-	case "keyboard":
-		s.Keyboard = str(v)
-	case "language":
-		s.Language = str(v)
-	case "selinux":
-		s.SELinux = str(v)
-	case "firewall":
-		s.Firewall = boolean(v)
-	case "services_enable":
-		s.Services = strSlice(v)
-	case "services_disable":
-		s.Disable = strSlice(v)
+	case "hostname":          s.Hostname = str(v)
+	case "locale":            s.Locale = str(v)
+	case "timezone":          s.Timezone = str(v)
+	case "keyboard":          s.Keyboard = str(v)
+	case "language":          s.Language = str(v)
+	case "selinux":           s.SELinux = str(v)
+	case "firewall":          s.Firewall = boolean(v)
+	case "services_enable":   s.Services = strSlice(v)
+	case "services_disable":  s.Disable = strSlice(v)
 	}
 }
 
 func setDesktopField(d *DesktopConfig, k, v string) {
 	switch k {
-	case "environment":
-		d.Environment = str(v)
-	case "display_server":
-		d.DisplayServer = str(v)
-	case "auto_login":
-		d.AutoLogin = boolean(v)
-	case "auto_login_user":
-		d.AutoLoginUser = str(v)
+	case "environment":    d.Environment = str(v)
+	case "display_server": d.DisplayServer = str(v)
+	case "auto_login":     d.AutoLogin = boolean(v)
+	case "auto_login_user": d.AutoLoginUser = str(v)
 	}
 }
 
 func setBootField(b *BootConfig, k, v string) {
 	switch k {
-	case "bootloader":
-		b.Bootloader = str(v)
-	case "kernel_args":
-		b.KernelArgs = str(v)
-	case "splash":
-		b.Splash = boolean(v)
-	case "timeout":
-		b.Timeout = integer(v)
+	case "bootloader":  b.Bootloader = str(v)
+	case "kernel_args": b.KernelArgs = str(v)
+	case "splash":      b.Splash = boolean(v)
+	case "timeout":     b.Timeout = integer(v)
 	}
 }
 
 func setAnacondaField(a *AnacondaConfig, k, v string) {
 	switch k {
-	case "enabled":
-		a.Enabled = boolean(v)
-	case "kickstart_embed":
-		a.KickstartEmbed = boolean(v)
-	case "product_name":
-		a.ProductName = str(v)
-	case "product_version":
-		a.ProductVersion = str(v)
-	case "webui":
-		a.WebUI = boolean(v)
-	case "hide_shell":
-		a.HideShell = boolean(v)
-	case "custom_logo":
-		a.CustomLogo = str(v)
-	case "custom_background":
-		a.CustomBackground = str(v)
-	case "default_lang":
-		a.DefaultLang = str(v)
-	case "default_keyboard":
-		a.DefaultKeyboard = str(v)
-	case "default_timezone":
-		a.DefaultTimezone = str(v)
-	case "root_password_lock":
-		a.RootPasswordLock = boolean(v)
-	case "default_user":
-		a.UserName = str(v)
-	case "default_user_groups":
-		a.UserGroups = strSlice(v)
+	case "enabled":             a.Enabled = boolean(v)
+	case "kickstart_embed":     a.KickstartEmbed = boolean(v)
+	case "product_name":        a.ProductName = str(v)
+	case "product_version":     a.ProductVersion = str(v)
+	case "webui":               a.WebUI = boolean(v)
+	case "hide_shell":          a.HideShell = boolean(v)
+	case "custom_logo":         a.CustomLogo = str(v)
+	case "custom_background":   a.CustomBackground = str(v)
+	case "default_lang":        a.DefaultLang = str(v)
+	case "default_keyboard":    a.DefaultKeyboard = str(v)
+	case "default_timezone":    a.DefaultTimezone = str(v)
+	case "root_password_lock":  a.RootPasswordLock = boolean(v)
+	case "default_user":        a.UserName = str(v)
+	case "default_user_groups": a.UserGroups = strSlice(v)
 	}
 }
 
 func setBuildField(b *BuildConfig, k, v string) {
 	switch k {
-	case "output_dir":
-		b.OutputDir = str(v)
-	case "cache_dir":
-		b.CacheDir = str(v)
-	case "tmp_dir":
-		b.TmpDir = str(v)
-	case "compression":
-		b.Compression = str(v)
-	case "iso_label":
-		b.ISOLabel = str(v)
-	case "iso_filename":
-		b.ISOFilename = str(v)
-	case "jobs":
-		b.Jobs = integer(v)
-	case "clean_build":
-		b.CleanBuild = boolean(v)
-	case "filesystem":
-		b.Filesystem = str(v)
+	case "output_dir":   b.OutputDir = str(v)
+	case "cache_dir":    b.CacheDir = str(v)
+	case "tmp_dir":      b.TmpDir = str(v)
+	case "compression":  b.Compression = str(v)
+	case "iso_label":    b.ISOLabel = str(v)
+	case "iso_filename": b.ISOFilename = str(v)
+	case "jobs":         b.Jobs = integer(v)
+	case "clean_build":  b.CleanBuild = boolean(v)
+	case "filesystem":   b.Filesystem = str(v)
 	}
 }
 
 func setContainerField(ct *ContainerConfig, k, v string) {
 	switch k {
-	case "enabled":
-		ct.Enabled = boolean(v)
-	case "registry":
-		ct.Registry = str(v)
-	case "image":
-		ct.Image = str(v)
-	case "tag":
-		ct.Tag = str(v)
-	case "push":
-		ct.Push = boolean(v)
-	case "sign_image":
-		ct.SignImage = boolean(v)
-	case "bootc_mode":
-		ct.BootcMode = boolean(v)
-	case "repo":
-		ct.Repo = str(v)
+	case "enabled":    ct.Enabled = boolean(v)
+	case "registry":   ct.Registry = str(v)
+	case "image":      ct.Image = str(v)
+	case "tag":        ct.Tag = str(v)
+	case "push":       ct.Push = boolean(v)
+	case "sign_image": ct.SignImage = boolean(v)
+	case "bootc_mode": ct.BootcMode = boolean(v)
+	case "repo":       ct.Repo = str(v)
 	}
 }
 
 func setNvidiaField(n *NvidiaConfig, k, v string) {
 	switch k {
-	case "enabled":
-		n.Enabled = boolean(v)
-	case "install_cuda":
-		n.InstallCUDA = boolean(v)
-	case "install_nvidia_settings":
-		n.InstallNVIDIASettings = boolean(v)
-	case "install_vaapi":
-		n.InstallVAAPI = boolean(v)
-	case "install_vulkan":
-		n.InstallVulkan = boolean(v)
-	case "blacklist_nouveau":
-		n.BlacklistNouveau = boolean(v)
-	case "enable_kms":
-		n.EnableKMS = boolean(v)
-	case "open_driver":
-		n.OpenDriver = boolean(v)
+	case "enabled":                 n.Enabled = boolean(v)
+	case "install_cuda":            n.InstallCUDA = boolean(v)
+	case "install_nvidia_settings": n.InstallNVIDIASettings = boolean(v)
+	case "install_vaapi":           n.InstallVAAPI = boolean(v)
+	case "install_vulkan":          n.InstallVulkan = boolean(v)
+	case "blacklist_nouveau":       n.BlacklistNouveau = boolean(v)
+	case "enable_kms":              n.EnableKMS = boolean(v)
+	case "open_driver":             n.OpenDriver = boolean(v)
 	}
 }
 
-
 func setBranchField(b *BranchConfig, k, v string) {
 	switch k {
-	case "name":
-		b.Name = str(v)
-	case "desktop":
-		b.Desktop = str(v)
-	case "display_name":
-		b.DisplayName = str(v)
-	case "tag":
-		b.Tag = str(v)
-	case "description":
-		b.Description = str(v)
-	case "extra_packages":
-		b.ExtraPackages = strSlice(v)
-	case "remove_packages":
-		b.RemovePackages = strSlice(v)
-	case "enabled":
-		b.Enabled = boolean(v)
+	case "name":            b.Name = str(v)
+	case "desktop":         b.Desktop = str(v)
+	case "display_name":    b.DisplayName = str(v)
+	case "tag":             b.Tag = str(v)
+	case "description":     b.Description = str(v)
+	case "extra_packages":  b.ExtraPackages = strSlice(v)
+	case "remove_packages": b.RemovePackages = strSlice(v)
+	case "enabled":         b.Enabled = boolean(v)
 	}
 }
 
 func setRepoField(r *RepoConfig, k, v string) {
 	switch k {
-	case "enabled":
-		r.Enabled = boolean(v)
-	case "baseurl":
-		r.BaseURL = str(v)
-	case "metalink":
-		r.MetaLink = str(v)
-	case "gpgcheck":
-		r.GPGCheck = boolean(v)
-	case "gpgkey":
-		r.GPGKey = str(v)
-	case "priority":
-		r.Priority = integer(v)
+	case "enabled":   r.Enabled = boolean(v)
+	case "baseurl":   r.BaseURL = str(v)
+	case "metalink":  r.MetaLink = str(v)
+	case "gpgcheck":  r.GPGCheck = boolean(v)
+	case "gpgkey":    r.GPGKey = str(v)
+	case "priority":  r.Priority = integer(v)
 	}
 }
 
 func (c *Config) applyDefaults() {
-	c.Project.BaseDistro = "fedora"
+	c.Project.BaseDistro  = "fedora"
 	c.Project.BaseVersion = 44
-	c.Project.Arch = "x86_64"
-	c.Build.OutputDir = "build/output"
-	c.Build.CacheDir = "build/cache"
-	c.Build.Compression = "xz"
-	c.Build.Jobs = 4
-	c.Build.Filesystem = "ext4"
-	c.Boot.Bootloader = "grub2"
-	c.Boot.Timeout = 5
-	c.System.SELinux = "enforcing"
+	c.Project.Arch        = "x86_64"
+	c.Build.OutputDir     = "build/output"
+	c.Build.CacheDir      = "build/cache"
+	c.Build.Compression   = "xz"
+	c.Build.Jobs          = 4
+	c.Build.Filesystem    = "ext4"
+	c.Boot.Bootloader     = "grub2"
+	c.Boot.Timeout        = 5
+	c.System.SELinux      = "enforcing"
 	// NVIDIA defaults — sensible for a gaming/dev distro
 	c.Nvidia.InstallNVIDIASettings = true
-	c.Nvidia.InstallVAAPI = true
-	c.Nvidia.InstallVulkan = true
-	c.Nvidia.BlacklistNouveau = true
-	c.Nvidia.EnableKMS = true
-	c.Nvidia.OpenDriver = false // safe default — works on all cards
+	c.Nvidia.InstallVAAPI          = true
+	c.Nvidia.InstallVulkan         = true
+	c.Nvidia.BlacklistNouveau      = true
+	c.Nvidia.EnableKMS             = true
+	c.Nvidia.OpenDriver            = false
 }
 
-// ReadPackageList reads install.packages or remove.packages
+// ReadPackageList reads install.packages / remove.packages.
 func ReadPackageList(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -599,7 +570,6 @@ func ReadPackageList(path string) ([]string, error) {
 func DetectLicense(root string) string {
 	data, err := os.ReadFile(filepath.Join(root, "LICENSE"))
 	if err != nil {
-		// try LICENSE.md, LICENSE.txt
 		for _, name := range []string{"LICENSE.md", "LICENSE.txt", "COPYING"} {
 			if d, err2 := os.ReadFile(filepath.Join(root, name)); err2 == nil {
 				data = d
