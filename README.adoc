@@ -1,208 +1,537 @@
-# ⬡ LegendaryOS Builder
+= LegendaryOS Builder
+:toc: left
+:toc-title: Spis treści
+:toclevels: 3
+:icons: font
+:source-highlighter: rouge
+:rouge-style: monokai
+:sectlinks:
+:sectanchors:
+:experimental:
+:imagesdir: docs/assets
 
-> Fedora-based OS image builder — bootc compatible, inspired by Debian live-build
+image:https://img.shields.io/badge/Fedora-44%2B-blue?logo=fedora[Fedora 44+]
+image:https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go[Go 1.22+]
+image:https://img.shields.io/badge/license-GPL--3.0-green[GPL-3.0]
+image:https://img.shields.io/badge/bootc-OCI%20native-blueviolet[bootc]
 
-Build custom Fedora 44+ OS images as bootable ISOs or bootc container images, with a clean project layout, GitHub Actions integration, and Anaconda installer support.
+____
+Zautomatyzowane narzędzie do budowania niestandardowych dystrybucji Linuksa opartych na Fedorze — jako obrazy bootc OCI i bootowalne pliki ISO.
+____
 
----
+== Co to jest?
 
-## Installation
+*LegendaryOS Builder* to narzędzie wiersza poleceń napisane w Go, które pozwala zbudować własną dystrybucję Linuksa opartą na Fedorze z jednego pliku konfiguracyjnego `config.toml`.
 
-```bash
-# From GitHub Releases
-curl -fsSL https://github.com/legendaryos/builder/releases/latest/download/legendaryos-linux-amd64.tar.gz \
-  | tar -xz
-sudo mv legendaryos /usr/local/bin/legendaryos
+Pipeline budowania składa się z dwóch etapów:
 
-# From source
-git clone https://github.com/legendaryos/builder
-cd builder
-make install
-```
+[source]
+----
+config.toml
+  │
+  ├─► build cloud ──► Containerfile ──► podman build ──► obraz OCI (ghcr.io)
+  │
+  └─► build iso ───► bootc-image-builder ──► .iso
+----
 
----
+Obraz OCI jest tworzony za pomocą https://github.com/containers/bootc[bootc], co oznacza, że system operacyjny może być aktualizowany atomowo przez `bootc upgrade` — jak aktualizacja Dockera, ale dla całego systemu.
 
-## Quick Start
+== Wymagania
 
-```bash
-# Create a new project interactively
-legendaryos init --fast
+[cols="1,2"]
+|===
+| Narzędzie | Uwagi
 
-# Or non-interactively
-legendaryos init ./my-distro
+| Fedora 44+ (host)
+| Wymagane dla `build cloud` i `build iso`
 
-# Validate config
-legendaryos validate
+| `podman` ≥ 4.x
+| Wymagane. `sudo dnf install podman`
 
-# Build container image (bootc)
-legendaryos build cloud
+| `bootc-image-builder`
+| Wymagane dla `build iso`. `sudo dnf install bootc-image-builder`
 
-# Build bootable ISO from the container
-legendaryos build iso
-```
+| Go 1.22+
+| Tylko do kompilacji buildera
 
----
+| Ruby
+| Tylko do uruchomienia `build.rb` (alternatywa dla make)
 
-## Project Layout
+| `cosign` _(opcjonalnie)_
+| Do podpisywania obrazów: `sudo dnf install cosign`
+|===
 
-```
-my-distro/
-├── config.toml            ← main configuration (project, system, desktop, anaconda...)
-├── install.packages       ← packages to install (one per line, # comments)
-├── remove.packages        ← packages to remove
-├── packages/              ← local .rpm files to install before package list
+[NOTE]
+====
+`build iso` wymaga uprawnień roota (`sudo`) — bootc-image-builder używa rootful podman.
+====
+
+== Instalacja
+
+=== Ze źródeł
+
+[source,bash]
+----
+git clone https://github.com/LegendaryOS-Linux-System/legendaryos-builder
+cd legendaryos-builder
+
+# Buduj i instaluj (Ruby)
+ruby build.rb install
+
+# lub przez go bezpośrednio
+go build -o legendaryos-builder .
+sudo install -m 0755 legendaryos-builder /usr/local/bin/legendaryos-builder
+----
+
+=== Release binary
+
+[source,bash]
+----
+curl -fsSL \
+  https://github.com/LegendaryOS-Linux-System/legendaryos-builder/releases/latest/download/legendaryos-builder-linux-amd64.tar.gz \
+  -o /tmp/legendaryos-builder.tar.gz
+
+tar -xzf /tmp/legendaryos-builder.tar.gz -C /tmp
+sudo install -m 0755 /tmp/legendaryos-builder /usr/local/bin/legendaryos-builder
+
+legendaryos-builder version
+----
+
+== Szybki start
+
+[source,bash]
+----
+# 1. Utwórz katalog projektu
+mkdir my-os && cd my-os
+
+# 2. Inicjalizacja projektu (interaktywny wizard)
+legendaryos-builder init --fast
+
+# 3. Edytuj konfigurację
+$EDITOR config.toml
+
+# 4. Zbuduj obraz OCI
+legendaryos-builder build cloud
+
+# 5. Zbuduj ISO (wymaga sudo)
+sudo legendaryos-builder build iso
+----
+
+== Struktura projektu
+
+Po `legendaryos-builder init` katalog projektu wygląda następująco:
+
+[source]
+----
+my-os/
+├── config.toml                 ← główna konfiguracja
+├── user.toml                   ← dane osobiste (gitignored)
+├── packages/
+│   ├── install.packages        ← pakiety DNF do instalacji
+│   ├── remove.packages         ← pakiety DNF do usunięcia
+│   ├── flatpak.packages        ← aplikacje Flatpak (Flathub IDs)
+│   ├── flatpak.remove.packages ← aplikacje Flatpak do usunięcia
+│   └── *.rpm                   ← lokalne pliki .rpm (opcjonalnie)
 ├── files/
-│   ├── before/            ← filesystem overlay applied BEFORE package install
-│   │   └── etc/
-│   └── after/             ← filesystem overlay applied AFTER package install
-│       └── etc/
-├── scripts/               ← hooks: .sh .py .pl .rb — run in order
-├── repos/                 ← custom .repo files (DNF repositories)
-├── .github/
-│   └── workflows/
-│       └── build-cloud.yml   ← GitHub Actions CI (auto-generated)
+│   ├── before/                 ← overlay przed instalacją pakietów
+│   └── after/                  ← overlay po instalacji pakietów
+├── scripts/
+│   ├── pre/                    ← skrypty na HOŚCIE przed buildem
+│   ├── before/                 ← skrypty w kontenerze PRZED dnf install
+│   └── after/                  ← skrypty w kontenerze PO dnf install
+├── repos/                      ← niestandardowe pliki .repo
+├── .github/workflows/
+│   └── build-cloud.yml         ← GitHub Actions CI
 └── build/
-    ├── cache/             ← build cache
-    └── output/            ← final .iso / container image artifacts
-```
+    ├── cache/
+    └── output/                 ← końcowe .iso
+----
 
----
+== config.toml — konfiguracja
 
-## Commands
+Plik `config.toml` jest jedynym miejscem, gdzie konfigurujesz swój system operacyjny.
 
-| Command | Description |
-|---|---|
-| `legendaryos init` | Initialize project scaffold |
-| `legendaryos init --fast` | Interactive wizard |
-| `legendaryos build cloud` | Build bootc container image |
-| `legendaryos build cloud --push` | Build and push to registry |
-| `legendaryos build cloud --no-cache` | Fresh build (no layer cache) |
-| `legendaryos build iso` | Build bootable ISO from container |
-| `legendaryos build iso --source ghcr.io/…` | ISO from remote image |
-| `legendaryos validate` | Validate project without building |
-| `legendaryos info` | Show project info and package lists |
-| `legendaryos clean` | Remove build outputs |
-| `legendaryos clean --all` | Remove entire build/ directory |
-| `legendaryos setup` | Install build dependencies (Fedora host) |
-| `legendaryos version` | Show builder version |
+=== Wersjonowanie
 
-Global flags: `--verbose` / `-v`, `--release`
+Pola `version`, `tag` i `product_version` przyjmują:
 
----
+* **Numery semver**: `0.1.0`, `1.2.3`, `44`
+* **Symboliczne etykiety kanałów**: `stable`, `beta`, `alpha`, `nightly`, `latest`, `edge`, `dev`
 
-## config.toml Reference
-
-```toml
+[source,toml]
+----
 [project]
-name         = "MyOS"
-version      = "0.1.0"
+version = "stable"    # etykieta kanału → tag OCI: ghcr.io/org/myos:stable
+
+# lub
+
+version = "0.1.0"     # semver → tag OCI: ghcr.io/org/myos:0.1.0
+----
+
+Symboliczne etykiety są przekazywane bez zmian do tagów OCI, nazw plików ISO i kickstarta Anacondy.
+
+=== Sekcja [project]
+
+[source,toml]
+----
+[project]
+name         = "LegendaryOS"
+version      = "stable"          # semver lub: stable | beta | alpha | nightly | latest | edge | dev
+description  = "Fedora-based OS"
+author       = "LegendaryOS-Linux-System"
+license      = "GPL-3.0"
 base_distro  = "fedora"
-base_version = 44
+base_version = 44                # minimalna wersja: 44
 arch         = "x86_64"
+----
 
+=== Sekcja [system]
+
+[source,toml]
+----
 [system]
-hostname   = "myos"
-locale     = "en_US.UTF-8"
-timezone   = "Europe/Warsaw"
-selinux    = "enforcing"
-firewall   = true
-services_enable  = ["sshd"]
+hostname         = "legendaryos"
+locale           = "pl_PL.UTF-8"
+language         = "pl_PL:pl:en_US:en"
+timezone         = "Europe/Warsaw"
+keyboard         = "pl"
+selinux          = "enforcing"   # enforcing | permissive | disabled
+firewall         = true
+services_enable  = ["sshd", "NetworkManager", "bluetooth"]
+services_disable = ["ModemManager"]
+----
 
+=== Sekcja [desktop]
+
+[source,toml]
+----
 [desktop]
-environment    = "gnome"   # gnome | kde | xfce | cinnamon | none
-display_server = "wayland"
+environment     = "kde"          # gnome | kde | xfce | cinnamon | mate | lxqt | cosmic | none
+display_server  = "wayland"      # wayland | x11 | both
+auto_login      = false
+auto_login_user = ""
+----
 
+=== Sekcja [boot]
+
+[source,toml]
+----
+[boot]
+bootloader  = "grub2"
+kernel_args = "quiet splash mitigations=off"
+splash      = true
+timeout     = 5
+----
+
+=== Sekcja [anaconda]
+
+[source,toml]
+----
 [anaconda]
-enabled        = true
-webui          = true
-product_name   = "MyOS"
-kickstart_embed = true
+enabled            = true
+product_name       = "LegendaryOS"
+product_version    = "stable"    # mirrors project.version
+webui              = true
+default_lang       = "pl_PL.UTF-8"
+default_keyboard   = "pl"
+default_timezone   = "Europe/Warsaw"
+root_password_lock = true
+default_user       = "user"
+default_user_groups = ["wheel", "audio", "video", "gamemode", "input", "render"]
+----
 
+=== Sekcja [build]
+
+[source,toml]
+----
+[build]
+output_dir   = "build/output"
+cache_dir    = "build/cache"
+compression  = "zstd"            # zstd | xz | gzip
+iso_label    = "LEGENDARYOS"
+iso_filename = ""                # puste = auto-generowane
+jobs         = 4
+filesystem   = "ext4"            # ext4 | xfs | btrfs
+----
+
+=== Sekcja [nvidia]
+
+[source,toml]
+----
+[nvidia]
+enabled                 = true
+open_driver             = false   # true = moduł open-source (tylko Turing+/RTX 20xx+)
+blacklist_nouveau        = true
+enable_kms              = true    # wymagane dla Wayland
+install_nvidia_settings = true
+install_vaapi           = true    # hardware-accelerated video decode
+install_vulkan          = true
+install_cuda            = false   # duże pobieranie — tylko dla ML/AI
+----
+
+=== Sekcja [container]
+
+[source,toml]
+----
 [container]
-enabled  = true
-registry = "ghcr.io/myorg"
-image    = "myos"
-tag      = "latest"
-push     = false
+enabled    = true
+# Tryby registry:
+#   "custom" → ghcr.io/<user.toml github.name>/<image>
+#   "repo"   → ghcr.io/<container.repo>
+registry   = "repo"
+repo       = "LegendaryOS-Linux-System/legendaryos"
+image      = "legendaryos"
+tag        = "stable"            # semver lub symboliczna etykieta
+push       = false
+sign_image = false
 bootc_mode = true
-```
+----
 
----
+=== Branches — warianty DE
 
-## install.packages / remove.packages
+[source,toml]
+----
+[[branch]]
+name         = "gnome"
+display_name = "LegendaryOS GNOME Edition"
+desktop      = "gnome"
+tag          = "stable-gnome"
+enabled      = true
+extra_packages  = ["@gnome-desktop-environment"]
+remove_packages = ["@kde-desktop-environment"]
+----
 
-Plain text, one package per line, comments with `#`:
+== Polecenia
 
-```
-# install.packages
+[source]
+----
+legendaryos-builder <polecenie> [flagi]
+----
+
+[cols="2,3"]
+|===
+| Polecenie | Opis
+
+| `build cloud`
+| Buduje obraz bootc OCI za pomocą podman
+
+| `build cloud --push`
+| Buduje i wysyła do ghcr.io
+
+| `build cloud --push --sign`
+| Buduje, wysyła i podpisuje przez cosign
+
+| `build cloud --no-cache`
+| Buduje bez cache'u warstw
+
+| `build cloud --release`
+| Tryb release: squash warstw, usunięcie symboli debugowania
+
+| `build iso`
+| Buduje bootowalne ISO z obrazu OCI
+
+| `build iso --source <img>`
+| ISO z konkretnego obrazu OCI
+
+| `build iso --output <path>`
+| Zapis ISO pod wskazaną ścieżkę
+
+| `build --release`
+| Pełny pipeline: cloud --push + iso
+
+| `settings`
+| Interaktywny edytor TUI konfiguracji
+
+| `init [dir]`
+| Inicjalizuje scaffold projektu
+
+| `init --fast`
+| Interaktywny wizard (zadaje pytania)
+
+| `validate`
+| Sprawdza konfigurację bez budowania
+
+| `info`
+| Wyświetla informacje o projekcie i listę pakietów
+
+| `clean`
+| Usuwa `build/output/`
+
+| `clean --all`
+| Usuwa cały katalog `build/`
+
+| `setup`
+| Instaluje zależności na hoście (Fedora)
+
+| `setup --release`
+| Instaluje również cosign
+
+| `version`
+| Wyświetla wersję buildera
+|===
+
+=== Flagi globalne
+
+[cols="1,2"]
+|===
+| Flaga | Opis
+| `--verbose`, `-v` | Pełne wyjście poleceń
+| `--release` | Tryb release
+| `--no-cache` | Wyłącza cache warstw podman
+|===
+
+== Pakiety, pliki i skrypty
+
+=== packages/install.packages
+
+Jeden pakiet DNF na linię. Komentarze zaczynają się od `#`. Grupy pakietów mają prefiks `@`.
+
+[source]
+----
 bash-completion
-vim-enhanced
-@gnome-desktop-environment   # group install with @
-firefox
-```
+curl
+git
+@kde-desktop-environment
+# to jest komentarz
+----
+
+=== packages/flatpak.packages
+
+Identyfikatory aplikacji Flatpak z Flathub — jeden na linię.
+
+[source]
+----
+com.visualstudio.code
+com.spotify.Client
+com.discordapp.Discord
+----
+
+=== files/before/ i files/after/
+
+Drzewa plików nakładane na obraz kontenera — `before/` przed instalacją pakietów, `after/` po instalacji.
+
+[source]
+----
+files/after/
+└── etc/
+    └── my-config.conf    → trafia do /etc/my-config.conf w obrazie
+----
+
+=== scripts/
+
+[cols="1,2"]
+|===
+| Katalog | Kiedy uruchamiany
+
+| `scripts/pre/`
+| Na HOŚCIE przed jakimkolwiek krokiem budowania
+
+| `scripts/before/`
+| W kontenerze PRZED `dnf install`
+
+| `scripts/after/`
+| W kontenerze PO `dnf install`
+|===
+
+Obsługiwane rozszerzenia: `.sh`, `.py`, `.pl`, `.rb`. Skrypty są sortowane i wykonywane alfabetycznie.
+
+Skrypty `before/` i `after/` mają dostęp do zmiennych środowiskowych:
+
+[source,bash]
+----
+$LEGENDARYOS_PROJECT   # nazwa projektu
+$LEGENDARYOS_VERSION   # wersja projektu
+$LEGENDARYOS_BUILD     # ścieżka do build/
+$LEGENDARYOS_ROOT      # korzeń projektu
+----
+
+== Pipeline CI/CD (GitHub Actions)
+
+`legendaryos-builder init` generuje `.github/workflows/build-cloud.yml`. Workflow:
+
+. Pobiera binarkę `legendaryos-builder`
+. Instaluje podman
+. Loguje się do `ghcr.io`
+. Oblicza tag obrazu (tag git lub `latest`)
+. Uruchamia `legendaryos-builder validate`
+. Uruchamia `legendaryos-builder build cloud --push`
+. Podpisuje obraz przez cosign (Sigstore)
+
+== user.toml
+
+Plik `user.toml` przechowuje dane osobiste i jest automatycznie pomijany przez `.gitignore`.
+
+[source,toml]
+----
+[github]
+type  = "org"               # user | org
+name  = "moja-organizacja"
+token = ""                  # zostaw puste — builder zapyta interaktywnie
+                            # lub użyj zmiennej środowiskowej GITHUB_TOKEN
+----
+
+Token można podać również przez zmienną środowiskową:
+
+[source,bash]
+----
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+legendaryos-builder build cloud --push
+----
+
+== Budowanie buildera
+
+[source,bash]
+----
+# Dev build
+ruby build.rb
+
+# Release binary + tarball + checksum
+ruby build.rb release
+
+# Instalacja do /usr/local/bin
+ruby build.rb install
+
+# Wszystkie testy
+ruby build.rb test
+
+# Formatowanie kodu
+ruby build.rb fmt
+
+# Sprawdzanie kodu
+ruby build.rb vet
+----
+
+== Architektura
+
+[source]
+----
+legendaryos-builder/
+├── main.go
+├── go.mod
+├── build.rb                    ← skrypt budowania (zastępuje Makefile)
+├── config.toml                 ← przykładowa konfiguracja projektu
+├── src/
+│   ├── builder/
+│   │   ├── cloud.go            ← CloudBuilder (podman build/push/sign)
+│   │   ├── iso.go              ← ISOBuilder (bootc-image-builder)
+│   │   └── kickstart.go        ← generator kickstarta Anaconda
+│   ├── cli/
+│   │   ├── cli.go              ← dispatcher poleceń
+│   │   ├── init.go             ← scaffold projektu + szablony
+│   │   ├── settings.go         ← interaktywny edytor konfiguracji TUI
+│   │   └── secret.go           ← czytanie hasła bez echa (POSIX termios)
+│   ├── config/
+│   │   ├── config.go           ← parser TOML + struktury + VersionTag
+│   │   └── user.go             ← parser user.toml
+│   └── ui/
+│       ├── ui.go               ← TUI: kolory, paski postępu, podsumowanie buildu
+│       └── usage.go            ← pomoc / instrukcja użycia
+----
+
+== Licencja
+
+Projekt jest dostępny na licencji *GPL-3.0*. Szczegóły w pliku link:LICENSE[LICENSE].
 
 ---
 
-## scripts/ Hooks
-
-Scripts run in alphabetical order. Supported: `.sh`, `.py`, `.pl`, `.rb`
-
-Environment variables available inside scripts:
-- `LEGENDARYOS_ROOTFS` — path to the rootfs
-- `LEGENDARYOS_BUILD` — build directory
-- `LEGENDARYOS_PROJECT` — project name
-- `LEGENDARYOS_VERSION` — project version
-
----
-
-## GitHub Actions
-
-`legendaryos init` generates `.github/workflows/build-cloud.yml` automatically.
-
-The workflow:
-1. Downloads the `legendaryos` binary from GitHub Releases
-2. Validates the project
-3. Builds the bootc container image with `legendaryos build cloud --push`
-4. Signs the image with cosign (keyless)
-5. Posts a build summary
-
-Push a tag to trigger a release: `git tag v0.1.0 && git push --tags`
-
----
-
-## How `build cloud` works
-
-```
-config.toml + install.packages + files/ + scripts/ + repos/
-        ↓
-  Containerfile (generated in build/)
-        ↓
-  podman build → OCI image
-        ↓
-  podman push → ghcr.io (optional)
-        ↓
-  cosign sign (optional)
-```
-
-## How `build iso` works
-
-```
-bootc container image (local or remote registry)
-        ↓
-  bootc-image-builder build --type iso
-        ↓
-  bootable hybrid ISO (El Torito + hybrid MBR)
-        ↓
-  build/output/<name>.iso
-```
-
----
-
-## Requirements
-
-- **Build host**: Fedora 40+ (for `legendaryos setup`)
-- **Tools**: `podman`, `buildah`, `bootc-image-builder`
-- **For ISO**: root or `newuidmap` permissions for `bootc-image-builder`
-- **For signing**: `cosign`
-
-Install everything: `sudo legendaryos setup`
+_LegendaryOS Builder — Fedora Edition · x86_64 · bootc OCI native_
