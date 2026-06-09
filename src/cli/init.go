@@ -24,6 +24,8 @@ type initAnswers struct {
 	image       string
 	anaconda    bool
 	bootc       bool
+	specialType string // "default" or "classic"
+	bootloader  string // "grub2", "refind", "limine", "systemd-boot", "syslinux", ""
 }
 
 func runInitWizard(dir string) {
@@ -31,19 +33,27 @@ func runInitWizard(dir string) {
 	fmt.Fprintln(ui.Out)
 
 	a := &initAnswers{}
-	a.name        = ui.AskDefault("Project name", "MyOS")
+	a.name = ui.AskDefault("Project name", "MyOS")
 
-	// Version — guide user to semver or symbolic label
 	fmt.Fprintln(ui.Out)
-	fmt.Fprintf(ui.Out, "  \033[90mVersion — enter a semver number (e.g. 0.1.0) or a symbolic label:\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90mVersion — semver (e.g. 0.1.0) or symbolic label:\033[0m\n")
 	fmt.Fprintf(ui.Out, "  \033[90m  stable | beta | alpha | nightly | latest | edge | dev\033[0m\n")
-	a.version     = ui.AskDefault("Version", "0.1.0")
+	a.version = ui.AskDefault("Version", "0.1.0")
 	if config.IsSymbolicVersion(a.version) {
 		ui.Info("Symbolic version label %q — will be used as the OCI tag", a.version)
 	}
 
 	a.description = ui.AskDefault("Description", "A custom Fedora-based OS")
 	a.author      = ui.AskDefault("Author", "")
+
+	// Build mode
+	fmt.Fprintln(ui.Out)
+	fmt.Fprintf(ui.Out, "  \033[90mBuild mode:\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90m  default → immutable Fedora (bootc/ostree)\033[0m\n")
+	fmt.Fprintf(ui.Out, "  \033[90m  classic → plain mutable Fedora\033[0m\n")
+	modes    := []string{"default", "classic"}
+	modeIdx  := ui.AskChoice("Build mode (special_type)", modes, 0)
+	a.specialType = modes[modeIdx]
 
 	desktops := []string{"gnome", "kde", "xfce", "cinnamon", "mate", "lxqt", "cosmic", "none"}
 	idx := ui.AskChoice("Desktop environment", desktops, 0)
@@ -59,17 +69,33 @@ func runInitWizard(dir string) {
 	a.anaconda  = ui.AskYN("Generate Anaconda installer?", true)
 	a.bootc     = ui.AskYN("Enable bootc container build?", true)
 
+	// Custom bootloader
+	fmt.Fprintln(ui.Out)
+	useCustomBL := ui.AskYN("Use custom bootloader? (default: grub2)", false)
+	if useCustomBL {
+		bls    := []string{"grub2", "refind", "limine", "systemd-boot", "syslinux"}
+		blIdx  := ui.AskChoice("Bootloader type", bls, 0)
+		a.bootloader = bls[blIdx]
+	}
+
 	scaffold(dir, a)
 }
 
 func runInitDefault(dir string) {
 	scaffold(dir, &initAnswers{
-		name: "MyOS", version: "0.1.0",
-		description: "A custom Fedora-based OS",
-		desktop: "gnome", hostname: "myos",
-		locale: "en_US.UTF-8", timezone: "UTC", keyboard: "us",
-		registry: "ghcr.io/myorg", image: "myos",
-		anaconda: true, bootc: true,
+		name:        "MyOS",
+	  version:     "0.1.0",
+	  description: "A custom Fedora-based OS",
+	  desktop:     "gnome",
+	  hostname:    "myos",
+	  locale:      "en_US.UTF-8",
+	  timezone:    "UTC",
+	  keyboard:    "us",
+	  registry:    "ghcr.io/myorg",
+	  image:       "myos",
+	  anaconda:    true,
+	  bootc:       true,
+	  specialType: "default",
 	})
 }
 
@@ -161,13 +187,14 @@ func scaffold(dir string, a *initAnswers) {
 
 	fmt.Fprintln(ui.Out)
 	ui.Section("Next steps")
-	ui.Info("1. Edit config.toml  (version can be semver or: stable | beta | nightly | …)")
-	ui.Info("2. Add packages to packages/install.packages")
-	ui.Info("3. Drop .rpm files into packages/")
-	ui.Info("4. Add files to files/after/ and files/before/")
-	ui.Info("5. Add hooks to scripts/before/ and scripts/after/")
-	ui.Info("6. legendaryos build cloud")
-	ui.Info("7. legendaryos build iso")
+	ui.Info("1.  Edit config.toml")
+	ui.Info("2.  Add packages to packages/install.packages")
+	ui.Info("3.  Add Flatpak IDs to packages/flatpak.packages  (applied at install time)")
+	ui.Info("4.  Drop .rpm files into packages/")
+	ui.Info("5.  Add files to files/after/ and files/before/")
+	ui.Info("6.  Add hooks to scripts/before/ and scripts/after/")
+	ui.Info("7.  legendaryos build cloud")
+	ui.Info("8.  legendaryos build iso")
 	fmt.Fprintln(ui.Out)
 }
 
@@ -182,8 +209,8 @@ func printTree(dir string) {
 		"  ├── packages/",
 		"  │   ├── install.packages        ← DNF packages to install",
 		"  │   ├── remove.packages         ← DNF packages to remove",
-		"  │   ├── flatpak.packages        ← Flatpak apps to install (Flathub IDs)",
-		"  │   ├── flatpak.remove.packages ← Flatpak apps to remove",
+		"  │   ├── flatpak.packages        ← Flatpak apps (applied at install time)",
+		"  │   ├── flatpak.remove.packages ← Flatpak apps to remove (install time)",
 		"  │   └── *.rpm                   ← local .rpm files (optional)",
 		"  ├── files/",
 		"  │   ├── before/            ← overlay BEFORE package install",
@@ -193,6 +220,7 @@ func printTree(dir string) {
 		"  │   ├── before/            ← run inside container BEFORE dnf install",
 		"  │   └── after/             ← run inside container AFTER dnf install",
 		"  ├── repos/                 ← custom .repo files",
+		"  ├── build.rb               ← optional custom build script",
 		"  ├── .github/workflows/",
 		"  │   └── build-cloud.yml    ← GitHub Actions CI",
 		"  └── build/",
@@ -218,116 +246,153 @@ func writeNew(path, content string) error {
 
 func renderConfig(a *initAnswers) string {
 	boolStr := func(b bool) string {
-		if b {
-			return "true"
-		}
+		if b { return "true" }
 		return "false"
 	}
 
-	// Add a comment when a symbolic version label is used
 	versionComment := ""
 	if config.IsSymbolicVersion(a.version) {
-		versionComment = fmt.Sprintf("  # channel label — use git tags for semver releases")
+		versionComment = "  # channel label — use git tags for semver releases"
 	}
 
+	specialTypeComment := ""
+	switch a.specialType {
+		case "classic":
+			specialTypeComment = "  # classic → plain mutable Fedora (no bootc/ostree)"
+		default:
+			specialTypeComment = "  # default → Fedora immutable (bootc/ostree)"
+	}
+
+	// Build the [bootloader] section
+	bootloaderSection := renderBootloaderSection(a.bootloader)
+
 	return fmt.Sprintf(`# ╔══════════════════════════════════════════════════════════════╗
-# ║              LegendaryOS Builder — config.toml              ║
-# ╚══════════════════════════════════════════════════════════════╝
-#
-# version / tag fields accept:
-#   • semver numbers  : 1.2.3
-#   • symbolic labels : stable | beta | alpha | nightly | latest | edge | dev
-#
-# Symbolic labels are passed through to OCI tags, ISO filenames and
-# the Anaconda kickstart as-is.
+	# ║              LegendaryOS Builder — config.toml              ║
+	# ╚══════════════════════════════════════════════════════════════╝
+	#
+	# version / tag fields accept:
+	#   • semver numbers  : 1.2.3
+	#   • symbolic labels : stable | beta | alpha | nightly | latest | edge | dev
+	#
+	# special_type:
+	#   "default" → Fedora immutable (bootc/ostree) — default when absent
+	#   "classic" → plain mutable Fedora (traditional RPM system)
 
-# ── Project ───────────────────────────────────────────────────────────────────
-[project]
-name         = %q
-version      = %q%s
-description  = %q
-author       = %q
-license      = "GPL-2.0"
-base_distro  = "fedora"
-base_version = 44
-arch         = "x86_64"
+	# ── Project ───────────────────────────────────────────────────────────────────
+	[project]
+	name         = %q
+	version      = %q%s
+	description  = %q
+	author       = %q
+	license      = "GPL-2.0"
+	base_distro  = "fedora"
+	base_version = 44
+	arch         = "x86_64"
+	special_type = %q%s
 
-# ── System ────────────────────────────────────────────────────────────────────
-[system]
-hostname         = %q
-locale           = %q
-timezone         = %q
-keyboard         = %q
-language         = "en_US"
-selinux          = "enforcing"
-firewall         = true
-services_enable  = ["sshd"]
-services_disable = []
+	# ── System ────────────────────────────────────────────────────────────────────
+	[system]
+	hostname         = %q
+	locale           = %q
+	timezone         = %q
+	keyboard         = %q
+	language         = "en_US"
+	selinux          = "enforcing"
+	firewall         = true
+	services_enable  = ["sshd"]
+	services_disable = []
 
-# ── Desktop ───────────────────────────────────────────────────────────────────
-[desktop]
-environment     = %q
-display_server  = "wayland"
-auto_login      = false
-auto_login_user = ""
+	# ── Desktop ───────────────────────────────────────────────────────────────────
+	[desktop]
+	environment     = %q
+	display_server  = "wayland"
+	auto_login      = false
+	auto_login_user = ""
 
-# ── Boot ──────────────────────────────────────────────────────────────────────
-[boot]
-bootloader  = "grub2"
-kernel_args = "quiet splash"
-splash      = true
-timeout     = 5
+	# ── Boot (legacy — overridden when [bootloader] enabled = true) ───────────────
+	[boot]
+	bootloader  = "grub2"
+	kernel_args = "quiet splash"
+	splash      = true
+	timeout     = 5
+	%s
+	# ── Anaconda Installer ────────────────────────────────────────────────────────
+	[anaconda]
+	enabled            = %s
+	kickstart_embed    = true
+	product_name       = %q
+	product_version    = %q
+	webui              = true
+	hide_shell         = false
+	default_lang       = %q
+	default_keyboard   = %q
+	default_timezone   = %q
+	root_password_lock = true
+	default_user       = "user"
+	default_user_groups = ["wheel", "audio", "video"]
 
-# ── Anaconda Installer ────────────────────────────────────────────────────────
-[anaconda]
-enabled            = %s
-kickstart_embed    = true
-product_name       = %q
-# product_version mirrors project.version — can be semver or symbolic label
-product_version    = %q
-webui              = true
-hide_shell         = false
-default_lang       = %q
-default_keyboard   = %q
-default_timezone   = %q
-root_password_lock = true
-default_user       = "user"
-default_user_groups = ["wheel", "audio", "video"]
+	# ── Build ─────────────────────────────────────────────────────────────────────
+	[build]
+	output_dir   = "build/output"
+	cache_dir    = "build/cache"
+	compression  = "xz"
+	iso_label    = %q
+	iso_filename = ""
+	jobs         = 4
+	clean_build  = false
+	filesystem   = "ext4"
 
-# ── Build ─────────────────────────────────────────────────────────────────────
-[build]
-output_dir   = "build/output"
-cache_dir    = "build/cache"
-compression  = "xz"
-iso_label    = %q
-iso_filename = ""
-jobs         = 4
-clean_build  = false
-# System filesystem type used by bootc-image-builder
-# Options: ext4 | xfs | btrfs   (default: ext4)
-filesystem   = "ext4"
-
-# ── Container / bootc ─────────────────────────────────────────────────────────
-[container]
-enabled    = %s
-registry   = %q
-image      = %q
-# tag mirrors project.version — accepts symbolic labels (stable, nightly, …)
-tag        = %q
-push       = false
-sign_image = false
-bootc_mode = true
-`,
-		a.name,
-		a.version, versionComment,
-		a.description, a.author,
-		a.hostname, a.locale, a.timezone, a.keyboard,
-		a.desktop,
-		boolStr(a.anaconda), a.name, a.version,
-		a.locale, a.keyboard, a.timezone,
-		strings.ToUpper(strings.ReplaceAll(a.image, "-", "_")),
-		boolStr(a.bootc), a.registry, a.image, a.version,
+	# ── Container / bootc ─────────────────────────────────────────────────────────
+	[container]
+	enabled    = %s
+	registry   = %q
+	image      = %q
+	tag        = %q
+	push       = false
+	sign_image = false
+	bootc_mode = true
+	`,
+	a.name,
+	a.version, versionComment,
+	a.description, a.author,
+	a.specialType, specialTypeComment,
+	a.hostname, a.locale, a.timezone, a.keyboard,
+	a.desktop,
+	bootloaderSection,
+	boolStr(a.anaconda), a.name, a.version,
+			   a.locale, a.keyboard, a.timezone,
+		    strings.ToUpper(strings.ReplaceAll(a.image, "-", "_")),
+			   boolStr(a.bootc), a.registry, a.image, a.version,
 	)
+}
+
+// renderBootloaderSection generates the [bootloader] config block.
+// When bootloader is empty the section is present but disabled (comments only).
+func renderBootloaderSection(bl string) string {
+	if bl == "" {
+		return `# ── Bootloader (optional) ────────────────────────────────────────────────────
+		# Uncomment and set enabled = true to use an alternative bootloader.
+		# When disabled (default), boot.bootloader above governs behaviour.
+		#
+		# [bootloader]
+		# enabled          = false
+		# type             = "grub2"    # grub2 | refind | limine | systemd-boot | syslinux
+		# extra_args       = ""         # extra kernel args appended when this bootloader is active
+		# install_packages = []         # extra DNF packages to install for this bootloader
+		# efi_dir          = "/boot/efi"
+		`
+	}
+
+	return fmt.Sprintf(`# ── Bootloader ───────────────────────────────────────────────────────────────
+	# type: grub2 | refind | limine | systemd-boot | syslinux
+	[bootloader]
+	enabled          = true
+	type             = %q
+	extra_args       = ""
+	install_packages = []
+	efi_dir          = "/boot/efi"
+
+	`, bl)
 }
 
 func renderInstallPackages(a *initAnswers) string {
@@ -341,42 +406,28 @@ func renderInstallPackages(a *initAnswers) string {
 	}
 	if a.desktop != "none" && a.desktop != "" {
 		switch a.desktop {
-		case "cosmic":
-			sb.WriteString("\n# ── COSMIC Desktop (System76) ──────────────────────────────────\n")
-			sb.WriteString("# Requires repos/cosmic.repo — see notes below\n")
-			for _, p := range []string{
-				"cosmic-session",
-				"cosmic-settings",
-				"cosmic-files",
-				"cosmic-terminal",
-				"cosmic-launcher",
-				"cosmic-panel",
-				"cosmic-dock",
-				"cosmic-applets",
-				"cosmic-bg",
-				"cosmic-notifications",
-				"cosmic-screenshot",
-				"cosmic-edit",
-				"cosmic-store",
-				"cosmic-greeter",
-				"xdg-user-dirs",
-				"pipewire",
-				"pipewire-alsa",
-				"pipewire-pulseaudio",
-				"wireplumber",
-			} {
-				sb.WriteString(p + "\n")
-			}
-		default:
-			sb.WriteString(fmt.Sprintf("\n# ── %s Desktop ──────────────────────────────────────────────────\n",
-				strings.Title(a.desktop)))
-			sb.WriteString(fmt.Sprintf("@%s-desktop-environment\n", a.desktop))
+			case "cosmic":
+				sb.WriteString("\n# ── COSMIC Desktop (System76) ──────────────────────────────────\n")
+				for _, p := range []string{
+					"cosmic-session", "cosmic-settings", "cosmic-files", "cosmic-terminal",
+					"cosmic-launcher", "cosmic-panel", "cosmic-dock", "cosmic-applets",
+					"cosmic-bg", "cosmic-notifications", "cosmic-screenshot", "cosmic-edit",
+					"cosmic-store", "cosmic-greeter", "xdg-user-dirs",
+					"pipewire", "pipewire-alsa", "pipewire-pulseaudio", "wireplumber",
+				} {
+					sb.WriteString(p + "\n")
+				}
+			default:
+				sb.WriteString(fmt.Sprintf("\n# ── %s Desktop ──────────────────────────────────────────────────\n",
+							   strings.Title(a.desktop))) //nolint
+				sb.WriteString(fmt.Sprintf("@%s-desktop-environment\n", a.desktop))
 		}
 	}
 	return sb.String()
 }
 
-var defaultFlatpakPkgs = `# packages/flatpak.packages — Flatpak apps to install (system-wide, from Flathub)
+var defaultFlatpakPkgs = `# packages/flatpak.packages — Flatpak apps to install at system install time
+# These are applied via the Anaconda %post section, NOT during the container build.
 # One Application ID per line, comments start with #
 # Find IDs at: https://flathub.org
 #
@@ -388,9 +439,9 @@ var defaultFlatpakPkgs = `# packages/flatpak.packages — Flatpak apps to instal
 # com.heroicgameslauncher.hgl
 `
 
-var defaultFlatpakRemovePkgs = `# packages/flatpak.remove.packages — Flatpak apps to remove
+var defaultFlatpakRemovePkgs = `# packages/flatpak.remove.packages — Flatpak apps to remove at install time
+# Applied via Anaconda %post, NOT during the container build.
 # One Application ID per line, comments start with #
-# Useful for removing pre-installed Flatpaks from the base image
 #
 # Examples:
 # org.gnome.Maps
@@ -407,37 +458,21 @@ var defaultRemovePkgs = `# packages/remove.packages — packages to remove after
 
 var exampleScriptBefore = `#!/usr/bin/env bash
 # scripts/before/00-example.sh
-# Runs BEFORE package installation.
-# Use for: adding custom repos, pre-seeding config, setting up keys.
+# Runs BEFORE package installation (inside container).
 set -euo pipefail
-
 echo "==> LegendaryOS [before] hook: ${0##*/}"
-
-# Example: import a GPG key before dnf install
-# rpm --import https://example.com/RPM-GPG-KEY-myrepo
 `
 
 var exampleScriptAfter = `#!/usr/bin/env bash
 # scripts/after/00-example.sh
-# Runs AFTER package installation.
-# Use for: system config, enabling services, sysctl tweaks, Flatpak remotes.
+# Runs AFTER package installation (inside container).
 set -euo pipefail
-
 echo "==> LegendaryOS [after] hook: ${0##*/}"
 echo "    Project : ${LEGENDARYOS_PROJECT:-unknown}"
 echo "    Version : ${LEGENDARYOS_VERSION:-unknown}"
-
-# Example: enable a systemd service
-# systemctl enable my-service.service
-
-# Example: add Flathub remote
-# flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 `
 
-var cosmicRepo = `# repos/cosmic.repo
-# COSMIC Desktop — System76
-# COPR: nickel-org/cosmic-desktop (community port for Fedora)
-
+var cosmicRepo = `# repos/cosmic.repo — COSMIC Desktop (System76) via COPR
 [copr:copr.fedorainfracloud.org:nickel-org:cosmic-desktop]
 name=COSMIC Desktop (Fedora $releasever)
 baseurl=https://download.copr.fedorainfracloud.org/results/nickel-org/cosmic-desktop/fedora-$releasever-x86_64/
@@ -497,9 +532,6 @@ func renderGHAWorkflow(a *initAnswers) string {
 
 	w("# .github/workflows/build-cloud.yml")
 	w("# Generated by LegendaryOS Builder")
-	w("#")
-	w("# Builds a bootc container image and pushes it to ghcr.io.")
-	w("# Trigger: push to main, version tags (v*), or workflow_dispatch.")
 	w("")
 	w("name: Build Cloud Image")
 	w("")
