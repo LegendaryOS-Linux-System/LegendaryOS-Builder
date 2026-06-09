@@ -17,6 +17,7 @@ image:https://img.shields.io/badge/bootc-OCI%20native-blueviolet[bootc]
 
 ____
 Zautomatyzowane narzędzie do budowania niestandardowych dystrybucji Linuksa opartych na Fedorze — jako obrazy bootc OCI i bootowalne pliki ISO.
+Obsługuje zarówno tryb *immutable* (bootc/ostree) jak i klasyczny tryb *mutable* Fedory.
 ____
 
 == Co to jest?
@@ -30,11 +31,14 @@ Pipeline budowania składa się z dwóch etapów:
 config.toml
   │
   ├─► build cloud ──► Containerfile ──► podman build ──► obraz OCI (ghcr.io)
+  │                   (immutable: fedora-bootc + ostree commit)
+  │                   (classic:   plain fedora, bez ostree)
   │
   └─► build iso ───► bootc-image-builder ──► .iso
 ----
 
-Obraz OCI jest tworzony za pomocą https://github.com/containers/bootc[bootc], co oznacza, że system operacyjny może być aktualizowany atomowo przez `bootc upgrade` — jak aktualizacja Dockera, ale dla całego systemu.
+Obraz OCI w trybie domyślnym jest tworzony za pomocą https://github.com/containers/bootc[bootc], co oznacza, że system operacyjny może być aktualizowany atomowo przez `bootc upgrade`.
+W trybie *classic* budowany jest standardowy obraz kontenera Fedory bez ostree.
 
 == Wymagania
 
@@ -55,7 +59,7 @@ Obraz OCI jest tworzony za pomocą https://github.com/containers/bootc[bootc], c
 | Tylko do kompilacji buildera
 
 | Ruby
-| Tylko do uruchomienia `build.rb` (alternatywa dla make)
+| Wymagane do uruchomienia `build.rb` oraz `build.rb install`
 
 | `cosign` _(opcjonalnie)_
 | Do podpisywania obrazów: `sudo dnf install cosign`
@@ -126,11 +130,12 @@ Po `legendaryos-builder init` katalog projektu wygląda następująco:
 my-os/
 ├── config.toml                 ← główna konfiguracja
 ├── user.toml                   ← dane osobiste (gitignored)
+├── build.rb                    ← opcjonalny własny skrypt budowania
 ├── packages/
 │   ├── install.packages        ← pakiety DNF do instalacji
 │   ├── remove.packages         ← pakiety DNF do usunięcia
-│   ├── flatpak.packages        ← aplikacje Flatpak (Flathub IDs)
-│   ├── flatpak.remove.packages ← aplikacje Flatpak do usunięcia
+│   ├── flatpak.packages        ← aplikacje Flatpak (stosowane przy instalacji OS)
+│   ├── flatpak.remove.packages ← aplikacje Flatpak do usunięcia (przy instalacji OS)
 │   └── *.rpm                   ← lokalne pliki .rpm (opcjonalnie)
 ├── files/
 │   ├── before/                 ← overlay przed instalacją pakietów
@@ -168,8 +173,6 @@ version = "stable"    # etykieta kanału → tag OCI: ghcr.io/org/myos:stable
 version = "0.1.0"     # semver → tag OCI: ghcr.io/org/myos:0.1.0
 ----
 
-Symboliczne etykiety są przekazywane bez zmian do tagów OCI, nazw plików ISO i kickstarta Anacondy.
-
 === Sekcja [project]
 
 [source,toml]
@@ -183,7 +186,25 @@ license      = "GPL-3.0"
 base_distro  = "fedora"
 base_version = 44                # minimalna wersja: 44
 arch         = "x86_64"
+
+# special_type — tryb budowania:
+#   "default" (lub brak) → Fedora immutable (bootc/ostree) — zachowanie jak dotychczas
+#   "classic"            → zwykła, mutowalna Fedora (tradycyjny system RPM, bez bootc)
+special_type = "default"
 ----
+
+==== special_type
+
+[cols="1,3"]
+|===
+| Wartość | Opis
+
+| `default` (lub brak pola)
+| Fedora immutable — obraz bazuje na `fedora-bootc`, kończy się `ostree container commit`. System aktualizowany atomowo przez `bootc upgrade`.
+
+| `classic`
+| Zwykła mutowalna Fedora — obraz bazuje na `registry.fedoraproject.org/fedora`, bez ostree. Standardowy system RPM taki jak tradycyjna instalacja Fedory.
+|===
 
 === Sekcja [system]
 
@@ -214,6 +235,8 @@ auto_login_user = ""
 
 === Sekcja [boot]
 
+Sekcja `[boot]` działa jak dotychczas gdy `[bootloader]` jest wyłączony lub nieobecny.
+
 [source,toml]
 ----
 [boot]
@@ -222,6 +245,47 @@ kernel_args = "quiet splash mitigations=off"
 splash      = true
 timeout     = 5
 ----
+
+=== Sekcja [bootloader] _(opcjonalna)_
+
+Nowa, opcjonalna sekcja pozwalająca wybrać alternatywny bootloader.
+Gdy `enabled = false` (lub sekcja jest nieobecna) zachowanie jest identyczne jak dotychczas — rządzi `boot.bootloader`.
+
+[source,toml]
+----
+[bootloader]
+enabled          = true
+# type: grub2 | refind | limine | systemd-boot | syslinux
+type             = "systemd-boot"
+# Dodatkowe argumenty kernela dołączane gdy ten bootloader jest aktywny
+extra_args       = ""
+# Dodatkowe pakiety DNF instalowane dla tego bootloadera
+install_packages = []
+# Katalog partycji EFI (domyślnie /boot/efi)
+efi_dir          = "/boot/efi"
+----
+
+==== Obsługiwane typy bootloadera
+
+[cols="1,2"]
+|===
+| Wartość | Opis
+
+| `grub2` (domyślny)
+| GRUB 2 — takie samo zachowanie jak `boot.bootloader = "grub2"`
+
+| `refind`
+| rEFInd — menedżer rozruchu EFI
+
+| `limine`
+| Limine — nowoczesny bootloader
+
+| `systemd-boot`
+| systemd-boot (sd-boot)
+
+| `syslinux`
+| SYSLINUX / ISOLINUX
+|===
 
 === Sekcja [anaconda]
 
@@ -260,13 +324,13 @@ filesystem   = "ext4"            # ext4 | xfs | btrfs
 ----
 [nvidia]
 enabled                 = true
-open_driver             = false   # true = moduł open-source (tylko Turing+/RTX 20xx+)
+open_driver             = false
 blacklist_nouveau        = true
-enable_kms              = true    # wymagane dla Wayland
+enable_kms              = true
 install_nvidia_settings = true
-install_vaapi           = true    # hardware-accelerated video decode
+install_vaapi           = true
 install_vulkan          = true
-install_cuda            = false   # duże pobieranie — tylko dla ML/AI
+install_cuda            = false
 ----
 
 === Sekcja [container]
@@ -275,13 +339,10 @@ install_cuda            = false   # duże pobieranie — tylko dla ML/AI
 ----
 [container]
 enabled    = true
-# Tryby registry:
-#   "custom" → ghcr.io/<user.toml github.name>/<image>
-#   "repo"   → ghcr.io/<container.repo>
 registry   = "repo"
 repo       = "LegendaryOS-Linux-System/legendaryos"
 image      = "legendaryos"
-tag        = "stable"            # semver lub symboliczna etykieta
+tag        = "stable"
 push       = false
 sign_image = false
 bootc_mode = true
@@ -313,7 +374,7 @@ legendaryos-builder <polecenie> [flagi]
 | Polecenie | Opis
 
 | `build cloud`
-| Buduje obraz bootc OCI za pomocą podman
+| Buduje obraz bootc/classic OCI za pomocą podman
 
 | `build cloud --push`
 | Buduje i wysyła do ghcr.io
@@ -338,6 +399,18 @@ legendaryos-builder <polecenie> [flagi]
 
 | `build --release`
 | Pełny pipeline: cloud --push + iso
+
+| `build`
+| Uruchamia `build.rb` z katalogu projektu (bez żadnych flag)
+
+| `build ;;`
+| Wyświetla wszystkie dostępne zadania zdefiniowane w `build.rb` (`--tasks`)
+
+| `build ''`
+| Wyświetla dostępne subkomendy `build.rb` (`--help`)
+
+| `build -_ <plik>`
+| Uruchamia wskazany plik zamiast `build.rb`
 
 | `settings`
 | Interaktywny edytor TUI konfiguracji
@@ -395,12 +468,17 @@ git
 # to jest komentarz
 ----
 
-=== packages/flatpak.packages
+=== packages/flatpak.packages i flatpak.remove.packages
 
-Identyfikatory aplikacji Flatpak z Flathub — jeden na linię.
+[NOTE]
+====
+Pliki `flatpak.packages` i `flatpak.remove.packages` **NIE są wykonywane podczas budowania obrazu OCI/kontenera**.
+Są one wbudowywane do sekcji `%post` kickstarta Anacondy i wykonywane na zainstalowanym systemie podczas procesu instalacji OS.
+====
 
 [source]
 ----
+# packages/flatpak.packages
 com.visualstudio.code
 com.spotify.Client
 com.discordapp.Discord
@@ -409,13 +487,6 @@ com.discordapp.Discord
 === files/before/ i files/after/
 
 Drzewa plików nakładane na obraz kontenera — `before/` przed instalacją pakietów, `after/` po instalacji.
-
-[source]
-----
-files/after/
-└── etc/
-    └── my-config.conf    → trafia do /etc/my-config.conf w obrazie
-----
 
 === scripts/
 
@@ -435,14 +506,81 @@ files/after/
 
 Obsługiwane rozszerzenia: `.sh`, `.py`, `.pl`, `.rb`. Skrypty są sortowane i wykonywane alfabetycznie.
 
-Skrypty `before/` i `after/` mają dostęp do zmiennych środowiskowych:
+=== build.rb — własny skrypt budowania
+
+Opcjonalny plik `build.rb` umieszczony obok `config.toml` jest uruchamiany przez polecenie `legendaryos-builder build` (bez żadnych argumentów).
 
 [source,bash]
 ----
-$LEGENDARYOS_PROJECT   # nazwa projektu
-$LEGENDARYOS_VERSION   # wersja projektu
-$LEGENDARYOS_BUILD     # ścieżka do build/
-$LEGENDARYOS_ROOT      # korzeń projektu
+# Uruchom build.rb
+legendaryos-builder build
+
+# Wyświetl wszystkie zadania zdefiniowane w build.rb
+legendaryos-builder build ;;
+
+# Wyświetl subkomendy build.rb (--help)
+legendaryos-builder build ''
+
+# Uruchom własny plik zamiast build.rb
+legendaryos-builder build -_ myscript.rb
+legendaryos-builder build -_ scripts/custom-build.rb
+----
+
+== Tryby budowania (special_type)
+
+=== default — Fedora immutable (bootc)
+
+Domyślny tryb. Obraz bazuje na `quay.io/fedora/fedora-bootc:<wersja>`.
+Containerfile kończy się `RUN ostree container commit`.
+System może być aktualizowany atomowo przez `bootc upgrade`.
+
+=== classic — zwykła Fedora
+
+Tryb klasyczny. Obraz bazuje na `registry.fedoraproject.org/fedora:<wersja>`.
+Brak ostree — standardowy, mutowalny system RPM identyczny z tradycyjną instalacją Fedory.
+Containerfile nie zawiera `ostree container commit`.
+
+[source,toml]
+----
+[project]
+special_type = "classic"   # zwykła Fedora
+# lub
+special_type = "default"   # immutable bootc (domyślnie)
+----
+
+== Konfiguracja bootloadera
+
+Sekcja `[bootloader]` jest opcjonalna. Gdy nieobecna lub `enabled = false`, builder zachowuje się identycznie jak przed jej dodaniem — rządzi `boot.bootloader`.
+
+=== Przykład: systemd-boot
+
+[source,toml]
+----
+[bootloader]
+enabled          = true
+type             = "systemd-boot"
+extra_args       = "mitigations=off"
+install_packages = ["efi-filesystem"]
+efi_dir          = "/boot/efi"
+----
+
+=== Przykład: rEFInd
+
+[source,toml]
+----
+[bootloader]
+enabled = true
+type    = "refind"
+efi_dir = "/boot/efi"
+----
+
+=== Przykład: Limine
+
+[source,toml]
+----
+[bootloader]
+enabled = true
+type    = "limine"
 ----
 
 == Pipeline CI/CD (GitHub Actions)
@@ -464,13 +602,13 @@ Plik `user.toml` przechowuje dane osobiste i jest automatycznie pomijany przez `
 [source,toml]
 ----
 [github]
-type  = "org"               # user | org
+type  = "org"
 name  = "moja-organizacja"
 token = ""                  # zostaw puste — builder zapyta interaktywnie
                             # lub użyj zmiennej środowiskowej GITHUB_TOKEN
 ----
 
-Token można podać również przez zmienną środowiskową:
+Token można podać przez zmienną środowiskową:
 
 [source,bash]
 ----
@@ -513,15 +651,18 @@ legendaryos-builder/
 ├── src/
 │   ├── builder/
 │   │   ├── cloud.go            ← CloudBuilder (podman build/push/sign)
+│   │   │                          obsługuje tryb immutable i classic
 │   │   ├── iso.go              ← ISOBuilder (bootc-image-builder)
 │   │   └── kickstart.go        ← generator kickstarta Anaconda
+│   │                              (Flatpak stosowany w %post)
 │   ├── cli/
-│   │   ├── cli.go              ← dispatcher poleceń
+│   │   ├── cli.go              ← dispatcher poleceń + obsługa build.rb
 │   │   ├── init.go             ← scaffold projektu + szablony
 │   │   ├── settings.go         ← interaktywny edytor konfiguracji TUI
 │   │   └── secret.go           ← czytanie hasła bez echa (POSIX termios)
 │   ├── config/
-│   │   ├── config.go           ← parser TOML + struktury + VersionTag
+│   │   ├── config.go           ← parser TOML + struktury + BootloaderConfig
+│   │   │                          + SpecialType + VersionTag
 │   │   └── user.go             ← parser user.toml
 │   └── ui/
 │       ├── ui.go               ← TUI: kolory, paski postępu, podsumowanie buildu
@@ -534,4 +675,4 @@ Projekt jest dostępny na licencji *MIT*. Szczegóły w pliku link:LICENSE[LICEN
 
 ---
 
-_LegendaryOS Builder — Fedora Edition · x86_64 · bootc OCI native_
+_LegendaryOS Builder — Fedora Edition · x86_64 · bootc OCI native · classic support_
