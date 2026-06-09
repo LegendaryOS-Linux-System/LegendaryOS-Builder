@@ -30,30 +30,30 @@ func Execute() {
 	rest := os.Args[2:]
 
 	switch cmd {
-	case "settings":
-		cmdSettings(rest)
-	case "build":
-		cmdBuild(rest)
-	case "init":
-		cmdInit(rest)
-	case "clean":
-		cmdClean(rest)
-	case "setup":
-		cmdSetup(rest)
-	case "validate":
-		cmdValidate(rest)
-	case "info":
-		cmdInfo(rest)
-	case "version", "--version":
-		cmdVersion()
-	case "help", "--help", "-h":
-		ui.PrintUsage(Version)
-	default:
-		ui.SmallBanner()
-		ui.Error("Unknown command: %q", cmd)
-		ui.Newline()
-		ui.PrintUsage(Version)
-		os.Exit(1)
+		case "settings":
+			cmdSettings(rest)
+		case "build":
+			cmdBuild(rest)
+		case "init":
+			cmdInit(rest)
+		case "clean":
+			cmdClean(rest)
+		case "setup":
+			cmdSetup(rest)
+		case "validate":
+			cmdValidate(rest)
+		case "info":
+			cmdInfo(rest)
+		case "version", "--version":
+			cmdVersion()
+		case "help", "--help", "-h":
+			ui.PrintUsage(Version)
+		default:
+			ui.SmallBanner()
+			ui.Error("Unknown command: %q", cmd)
+			ui.Newline()
+			ui.PrintUsage(Version)
+			os.Exit(1)
 	}
 }
 
@@ -77,8 +77,8 @@ func runSteps(steps []namedStep, cfg *config.Config, start time.Time, imgTag, is
 				ProjectName: cfg.Project.Name,
 				Version:     cfg.Project.Version,
 				Distro:      fmt.Sprintf("Fedora %d", cfg.Project.BaseVersion),
-				Steps:       summary,
-				Duration:    time.Since(start),
+					     Steps:       summary,
+					     Duration:    time.Since(start),
 			})
 			ui.Fatal("%v", err)
 		}
@@ -90,39 +90,140 @@ func runSteps(steps []namedStep, cfg *config.Config, start time.Time, imgTag, is
 		ProjectName: cfg.Project.Name,
 		Version:     cfg.Project.Version,
 		Distro:      fmt.Sprintf("Fedora %d", cfg.Project.BaseVersion),
-		Steps:       summary,
-		ImageTag:    imgTag,
-		ISOPath:     isoPath,
-		Duration:    time.Since(start),
+			     Steps:       summary,
+			     ImageTag:    imgTag,
+			     ISOPath:     isoPath,
+			     Duration:    time.Since(start),
 	})
 }
 
 // ── build ─────────────────────────────────────────────────────────────────────
 
+// cmdBuild dispatches build subcommands.
+//
+// Special invocation forms (no standard subcommand):
+//
+//	legendaryos-builder build
+//	    → runs build.rb in the project directory (if it exists)
+//
+//	legendaryos-builder build ;;
+//	    → shows all available tasks/commands defined in build.rb
+//
+//	legendaryos-builder build ''
+//	    → shows available subcommands of build.rb
+//
+//	legendaryos-builder build -_ <file>
+//	    → runs a custom build file instead of build.rb
 func cmdBuild(args []string) {
+	// ── special: -_ <file> — run a custom build file ──────────────────────
+	if len(args) >= 2 && args[0] == "-_" {
+		cmdBuildCustomFile(args[1], args[2:])
+		return
+	}
+
+	// ── special: ;; — list all tasks in build.rb ──────────────────────────
+	if len(args) == 1 && args[0] == ";;" {
+		cmdBuildRubyList(cwd(), "build.rb", true)
+		return
+	}
+
+	// ── special: '' (empty string) — list subcommands of build.rb ─────────
+	if len(args) == 1 && args[0] == "" {
+		cmdBuildRubyList(cwd(), "build.rb", false)
+		return
+	}
+
+	// ── no args: run build.rb directly ────────────────────────────────────
 	if len(args) == 0 {
-		ui.SmallBanner()
-		ui.Warn("Specify a target: 'build cloud' or 'build iso'")
-		ui.Newline()
-		fmt.Fprintln(ui.Out, "  Examples:")
-		fmt.Fprintln(ui.Out, "    legendaryos build cloud")
-		fmt.Fprintln(ui.Out, "    legendaryos build cloud --push")
-		fmt.Fprintln(ui.Out, "    legendaryos build iso")
-		fmt.Fprintln(ui.Out, "    legendaryos build iso --source ghcr.io/org/myos:latest")
-		ui.Newline()
+		cmdBuildRubyDefault(cwd(), "build.rb")
+		return
+	}
+
+	// ── standard subcommands ──────────────────────────────────────────────
+	switch args[0] {
+		case "cloud":
+			cmdBuildCloud(args[1:])
+		case "iso":
+			cmdBuildISO(args[1:])
+		case "--release", "release":
+			cmdBuildRelease(args[1:])
+		default:
+			ui.SmallBanner()
+			ui.Error("Unknown build target %q — use 'cloud', 'iso', '--release', or omit for build.rb", args[0])
+			ui.Newline()
+			fmt.Fprintln(ui.Out, "  Examples:")
+			fmt.Fprintln(ui.Out, "    legendaryos build cloud")
+			fmt.Fprintln(ui.Out, "    legendaryos build iso")
+			fmt.Fprintln(ui.Out, "    legendaryos build            # runs build.rb")
+			fmt.Fprintln(ui.Out, "    legendaryos build ;;         # list all tasks in build.rb")
+			fmt.Fprintln(ui.Out, "    legendaryos build ''         # list subcommands in build.rb")
+			fmt.Fprintln(ui.Out, "    legendaryos build -_ myscript.rb  # run custom build file")
+			ui.Newline()
+			os.Exit(1)
+	}
+}
+
+// cmdBuildRubyDefault runs build.rb (or the nearest equivalent) with no extra args.
+func cmdBuildRubyDefault(root, filename string) {
+	ui.SmallBanner()
+	path := filepath.Join(root, filename)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		ui.Error("%s not found in %s", filename, root)
+		ui.Info("Create a build.rb file next to config.toml, or use:")
+		ui.Info("  legendaryos build cloud")
+		ui.Info("  legendaryos build iso")
 		os.Exit(1)
 	}
-	switch args[0] {
-	case "cloud":
-		cmdBuildCloud(args[1:])
-	case "iso":
-		cmdBuildISO(args[1:])
-	case "--release", "release":
-		cmdBuildRelease(args[1:])
-	default:
-		ui.SmallBanner()
-		ui.Error("Unknown build target %q — use 'cloud', 'iso' or '--release'", args[0])
+	ui.Section(fmt.Sprintf("Running %s", filename))
+	runRubyFile(path, nil)
+}
+
+// cmdBuildRubyList prints available tasks/subcommands from build.rb.
+// When full=true it passes --tasks (Rake-style); otherwise --help.
+func cmdBuildRubyList(root, filename string, full bool) {
+	ui.SmallBanner()
+	path := filepath.Join(root, filename)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		ui.Error("%s not found in %s", filename, root)
 		os.Exit(1)
+	}
+	var extraArgs []string
+	if full {
+		ui.Section(fmt.Sprintf("Tasks in %s", filename))
+		extraArgs = []string{"--tasks"}
+	} else {
+		ui.Section(fmt.Sprintf("Subcommands in %s", filename))
+		extraArgs = []string{"--help"}
+	}
+	runRubyFile(path, extraArgs)
+}
+
+// cmdBuildCustomFile runs a user-specified build file (not necessarily build.rb).
+func cmdBuildCustomFile(filename string, extraArgs []string) {
+	ui.SmallBanner()
+	// Resolve relative to cwd
+	if !filepath.IsAbs(filename) {
+		filename = filepath.Join(cwd(), filename)
+	}
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		ui.Error("Build file not found: %s", filename)
+		os.Exit(1)
+	}
+	ui.Section(fmt.Sprintf("Running custom build file: %s", filepath.Base(filename)))
+	runRubyFile(filename, extraArgs)
+}
+
+// runRubyFile executes a Ruby script, passing extraArgs to it.
+func runRubyFile(path string, extraArgs []string) {
+	args := append([]string{path}, extraArgs...)
+	cmd := exec.Command("ruby", args...)
+	cmd.Stdin  = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir    = filepath.Dir(path)
+	cmd.Env    = os.Environ()
+	if err := cmd.Run(); err != nil {
+		ui.Fatal("build file failed: %v", err)
 	}
 }
 
@@ -142,7 +243,7 @@ func cmdBuildCloud(args []string) {
 	verb := *verbose || *vShort
 	ui.SmallBanner()
 
-	root := cwd()
+	root  := cwd()
 	start := time.Now()
 
 	cfg, err := config.Load(root)
@@ -155,16 +256,20 @@ func cmdBuildCloud(args []string) {
 		uc = &config.UserConfig{}
 	}
 	paths := config.GetPaths(root)
-	tag := imageTag(cfg, uc)
+	tag   := imageTag(cfg, uc)
 
 	token := askGitHubToken(uc)
 
 	ui.Section("Cloud Build")
 	ui.Info("Project  : %s %s", cfg.Project.Name, cfg.Project.Version)
-	ui.Info("Base     : quay.io/fedora/fedora-bootc:%d", cfg.Project.BaseVersion)
+	ui.Info("Mode     : %s", buildModeLabel(cfg))
+	ui.Info("Base     : %s", cloudBaseImage(cfg))
 	ui.Info("Image    : %s", tag)
 	ui.Info("Platform : %s", *platform)
 	ui.Info("Registry : %s", registryHost(cfg, uc))
+	if cfg.Bootloader.Enabled {
+		ui.Info("Bootloader: %s (custom)", cfg.ResolvedBootloader())
+	}
 	if *push    { ui.Info("Push     : yes") }
 	if *release { ui.Info("Mode     : RELEASE") }
 	ui.Newline()
@@ -206,7 +311,7 @@ func cmdBuildISO(args []string) {
 	verb := *verbose || *vShort
 	ui.SmallBanner()
 
-	root := cwd()
+	root  := cwd()
 	start := time.Now()
 
 	storageCfgPath := filepath.Join(root, "build", "storage.conf")
@@ -239,7 +344,7 @@ func cmdBuildISO(args []string) {
 		fn := cfg.Build.ISOFilename
 		if fn == "" {
 			fn = fmt.Sprintf("%s-%s-fedora%d.x86_64.iso",
-				name, cfg.Project.Version, cfg.Project.BaseVersion)
+					 name, cfg.Project.Version, cfg.Project.BaseVersion)
 		}
 		outPath = filepath.Join(paths.OutputDir, fn)
 	}
@@ -260,11 +365,15 @@ func cmdBuildISO(args []string) {
 	token := askGitHubToken(uc)
 
 	ui.Section("ISO Build")
-	ui.Info("Source   : %s", srcImage)
-	ui.Info("Output   : %s", outPath)
-	ui.Info("Label    : %s", isoLabel)
-	if ksPath != ""  { ui.Info("Kickstart: %s", ksPath) }
-	if *release      { ui.Info("Mode     : RELEASE") }
+	ui.Info("Source     : %s", srcImage)
+	ui.Info("Output     : %s", outPath)
+	ui.Info("Label      : %s", isoLabel)
+	ui.Info("Mode       : %s", buildModeLabel(cfg))
+	if cfg.Bootloader.Enabled {
+		ui.Info("Bootloader : %s (custom)", cfg.ResolvedBootloader())
+	}
+	if ksPath != ""  { ui.Info("Kickstart  : %s", ksPath) }
+	if *release      { ui.Info("Mode       : RELEASE") }
 	ui.Newline()
 
 	bISO := builder.NewISO(cfg, paths, verb, *release)
@@ -282,9 +391,9 @@ func cmdBuildISO(args []string) {
 	}
 	src, out, lbl, ks := srcImage, outPath, isoLabel, ksPath
 	steps = append(steps,
-		namedStep{"Pull source image", func() error { return bISO.PullImage(src) }},
-		namedStep{"Build ISO",         func() error { return bISO.BuildISO(src, out, lbl, ks) }},
-		namedStep{"Verify ISO",        func() error { return bISO.VerifyISO(out) }},
+		       namedStep{"Pull source image", func() error { return bISO.PullImage(src) }},
+		       namedStep{"Build ISO",         func() error { return bISO.BuildISO(src, out, lbl, ks) }},
+		       namedStep{"Verify ISO",        func() error { return bISO.VerifyISO(out) }},
 	)
 
 	runSteps(steps, cfg, start, "", outPath)
@@ -314,7 +423,7 @@ func cmdInit(args []string) {
 
 func cmdClean(args []string) {
 	fs := flag.NewFlagSet("clean", flag.ExitOnError)
-	all := fs.Bool("all", false, "Remove entire build/ dir including cache (uses sudo for root-owned files)")
+	all := fs.Bool("all", false, "Remove entire build/ dir (uses sudo for root-owned files)")
 	fs.Parse(args) //nolint
 
 	ui.SmallBanner()
@@ -323,7 +432,6 @@ func cmdClean(args []string) {
 	paths := config.GetPaths(cwd())
 
 	if !*all {
-		// Zwykłe czyszczenie — tylko build/output/
 		targets := []string{paths.OutputDir}
 		for _, t := range targets {
 			if _, err := os.Stat(t); os.IsNotExist(err) {
@@ -331,8 +439,6 @@ func cmdClean(args []string) {
 				continue
 			}
 			if err := os.RemoveAll(t); err != nil {
-				// Prawdopodobnie pliki należą do roota (z poprzedniego sudo build iso)
-				// Spróbuj przez sudo rm -rf
 				ui.Warn("Permission denied, retrying with sudo: %s", t)
 				if sudoErr := sudoRemove(t); sudoErr != nil {
 					ui.Fatal("Cannot remove %s: %v", t, sudoErr)
@@ -347,12 +453,7 @@ func cmdClean(args []string) {
 		return
 	}
 
-	// ── clean --all ───────────────────────────────────────────────────────────
-	// Całe build/ może zawierać pliki root:root (podman-storage, iso-work,
-	// output/bootiso/install.iso) — usuwamy przez sudo żeby mieć pewność.
-
 	buildDir := paths.BuildDir
-
 	if _, err := os.Stat(buildDir); os.IsNotExist(err) {
 		ui.Info("Already clean: %s", buildDir)
 	} else {
@@ -363,7 +464,6 @@ func cmdClean(args []string) {
 		ui.OK("Removed: %s", buildDir)
 	}
 
-	// Odtwórz puste katalogi po czyszczeniu
 	for _, d := range []string{paths.BuildDir, paths.OutputDir, paths.CacheDir} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			ui.Warn("Cannot recreate %s: %v", d, err)
@@ -371,9 +471,6 @@ func cmdClean(args []string) {
 	}
 	ui.OK("Build directories recreated")
 
-	// ── podman system prune ───────────────────────────────────────────────────
-	// Usuwa nieużywane obrazy, kontenery, wolumeny i sieci z podman storage.
-	// Musi działać jako root (rootful podman używany przez BIB).
 	ui.Newline()
 	ui.Info("Running: sudo podman system prune -a --volumes --force")
 	pruneCmd := exec.Command("sudo", "podman", "system", "prune", "-a", "--volumes", "--force")
@@ -381,7 +478,6 @@ func cmdClean(args []string) {
 	pruneCmd.Stderr = os.Stderr
 	pruneCmd.Stdin  = os.Stdin
 	if err := pruneCmd.Run(); err != nil {
-		// Nie traktuj jako fatal — prune może nie mieć nic do usunięcia
 		ui.Warn("podman system prune returned error (may be harmless): %v", err)
 	} else {
 		ui.OK("podman system prune done")
@@ -392,8 +488,6 @@ func cmdClean(args []string) {
 	ui.Newline()
 }
 
-// sudoRemove usuwa katalog lub plik przez "sudo rm -rf <path>".
-// Używane gdy pliki należą do roota (build iso uruchamiane przez sudo).
 func sudoRemove(path string) error {
 	cmd := exec.Command("sudo", "rm", "-rf", path)
 	cmd.Stdout = os.Stdout
@@ -444,7 +538,6 @@ func cmdBuildRelease(args []string) {
 	if os.Getuid() != 0 {
 		ui.Section("Sudo required for ISO build")
 		ui.Info("bootc-image-builder requires root access (rootful podman)")
-		ui.Info("Asking for sudo password now — used for the ISO phase")
 		ui.Newline()
 
 		self, err := os.Executable()
@@ -464,7 +557,7 @@ func cmdBuildRelease(args []string) {
 		cmd.Stdin  = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Env = os.Environ()
+		cmd.Env    = os.Environ()
 
 		if err := cmd.Run(); err != nil {
 			os.Exit(1)
@@ -484,14 +577,18 @@ func cmdBuildRelease(args []string) {
 
 	token := askGitHubToken(uc)
 
-	tag := imageTag(cfg, uc)
-	reg := registryHost(cfg, uc)
+	tag      := imageTag(cfg, uc)
+	reg      := registryHost(cfg, uc)
 	username := uc.GitHub.Name
 
 	ui.Section("Release Pipeline")
-	ui.Info("Step 1/2 : build cloud --push (build + push container)")
-	ui.Info("Step 2/2 : build iso          (container → bootable ISO)")
+	ui.Info("Mode     : %s", buildModeLabel(cfg))
+	ui.Info("Step 1/2 : build cloud --push")
+	ui.Info("Step 2/2 : build iso")
 	ui.Info("Image    : %s", tag)
+	if cfg.Bootloader.Enabled {
+		ui.Info("Bootloader: %s (custom)", cfg.ResolvedBootloader())
+	}
 	ui.Newline()
 
 	ui.Section("Phase 1 — Cloud Build")
@@ -519,7 +616,7 @@ func cmdBuildRelease(args []string) {
 	if fn == "" {
 		fn = fmt.Sprintf("%s-%s-fedora%d.x86_64.iso", name, cfg.Project.Version, cfg.Project.BaseVersion)
 	}
-	outPath := filepath.Join(paths.OutputDir, fn)
+	outPath  := filepath.Join(paths.OutputDir, fn)
 	isoLabel := cfg.Build.ISOLabel
 	if isoLabel == "" {
 		isoLabel = strings.ToUpper(strings.ReplaceAll(cfg.Project.Name, " ", "_"))
@@ -544,22 +641,22 @@ func cmdBuildRelease(args []string) {
 	}
 	t, o, l, k := tag, outPath, isoLabel, ksPath
 	isoSteps = append(isoSteps,
-		namedStep{"Pull source image", func() error { return bISO.PullImage(t) }},
-		namedStep{"Build ISO",         func() error { return bISO.BuildISO(t, o, l, k) }},
-		namedStep{"Verify ISO",        func() error { return bISO.VerifyISO(o) }},
+			  namedStep{"Pull source image", func() error { return bISO.PullImage(t) }},
+			  namedStep{"Build ISO",         func() error { return bISO.BuildISO(t, o, l, k) }},
+			  namedStep{"Verify ISO",        func() error { return bISO.VerifyISO(o) }},
 	)
 	runSteps(isoSteps, cfg, start2, "", outPath)
 }
 
 func registryHost(cfg *config.Config, uc *config.UserConfig) string {
 	switch cfg.Container.Registry {
-	case "", "custom":
-		return "ghcr.io"
-	case "repo":
-		return "ghcr.io"
-	default:
-		parts := strings.SplitN(cfg.Container.Registry, "/", 2)
-		return parts[0]
+		case "", "custom":
+			return "ghcr.io"
+		case "repo":
+			return "ghcr.io"
+		default:
+			parts := strings.SplitN(cfg.Container.Registry, "/", 2)
+			return parts[0]
 	}
 }
 
@@ -592,6 +689,30 @@ func cmdValidate(_ []string) {
 			}
 			return nil
 		}},
+		{"special_type", func() error {
+			st := cfg.Project.SpecialType
+			ui.Info("special_type = %s", st)
+			return nil
+		}},
+		{"bootloader", func() error {
+			if cfg.Bootloader.Enabled {
+				bl := cfg.Bootloader.Type
+				ui.Info("custom bootloader = %s", bl)
+				validBLs := map[string]bool{
+					"grub2": true, "grub": true,
+					"refind":       true,
+					"limine":       true,
+					"systemd-boot": true,
+					"syslinux":     true,
+				}
+				if !validBLs[strings.ToLower(bl)] {
+					ui.Warn("bootloader type %q is custom/unknown — no automatic setup steps", bl)
+				}
+			} else {
+				ui.Info("bootloader = %s (legacy boot section)", cfg.Boot.Bootloader)
+			}
+			return nil
+		}},
 		{"desktop environment", func() error {
 			env := cfg.Desktop.Environment
 			valid := map[string]bool{
@@ -606,7 +727,6 @@ func cmdValidate(_ []string) {
 				cosmicRepoPath := filepath.Join(paths.ReposDir, "cosmic.repo")
 				if _, err := os.Stat(cosmicRepoPath); os.IsNotExist(err) {
 					ui.Warn("repos/cosmic.repo not found — COSMIC packages won't install")
-					ui.Warn("Run: legendaryos init to regenerate, or add repos/cosmic.repo manually")
 				} else {
 					ui.Info("repos/cosmic.repo present")
 				}
@@ -616,41 +736,33 @@ func cmdValidate(_ []string) {
 		}},
 		{"packages/install.packages", func() error {
 			pkgs, err := config.ReadPackageList(paths.InstallPkgs)
-			if err != nil {
-				return err
-			}
+			if err != nil { return err }
 			ui.Info("%d packages to install (DNF)", len(pkgs))
 			return nil
 		}},
 		{"packages/remove.packages", func() error {
 			pkgs, err := config.ReadPackageList(paths.RemovePkgs)
-			if err != nil {
-				return err
-			}
+			if err != nil { return err }
 			ui.Info("%d packages to remove (DNF)", len(pkgs))
 			return nil
 		}},
 		{"packages/flatpak.packages", func() error {
 			pkgs, err := config.ReadPackageList(paths.FlatpakPkgs)
-			if err != nil {
-				return err
-			}
-			ui.Info("%d Flatpak apps to install", len(pkgs))
+			if err != nil { return err }
+			ui.Info("%d Flatpak apps to install (at install time via Anaconda)", len(pkgs))
 			return nil
 		}},
 		{"packages/flatpak.remove.packages", func() error {
 			pkgs, err := config.ReadPackageList(paths.FlatpakRemovePkgs)
-			if err != nil {
-				return err
-			}
-			ui.Info("%d Flatpak apps to remove", len(pkgs))
+			if err != nil { return err }
+			ui.Info("%d Flatpak apps to remove (at install time via Anaconda)", len(pkgs))
 			return nil
 		}},
-		{"files/before/", func() error { ui.Info("%d files", countFiles(paths.FilesBefore)); return nil }},
-		{"files/after/",  func() error { ui.Info("%d files", countFiles(paths.FilesAfter)); return nil }},
+		{"files/before/",   func() error { ui.Info("%d files", countFiles(paths.FilesBefore)); return nil }},
+		{"files/after/",    func() error { ui.Info("%d files", countFiles(paths.FilesAfter)); return nil }},
 		{"scripts/before/", func() error { ui.Info("%d scripts", countFiles(paths.ScriptsBefore)); return nil }},
 		{"scripts/after/",  func() error { ui.Info("%d scripts", countFiles(paths.ScriptsAfter)); return nil }},
-		{"repos/",        func() error { ui.Info("%d repos", countFiles(paths.ReposDir)); return nil }},
+		{"repos/",          func() error { ui.Info("%d repos", countFiles(paths.ReposDir)); return nil }},
 	}
 
 	allOK := true
@@ -682,29 +794,41 @@ func cmdInfo(_ []string) {
 	paths := config.GetPaths(root)
 
 	kv := func(k, v string) {
-		if v == "" {
-			return
-		}
-		fmt.Fprintf(ui.Out, "  \033[90m%-20s\033[0m \033[97;1m%s\033[0m\n", k+":", v)
+		if v == "" { return }
+		fmt.Fprintf(ui.Out, "  \033[90m%-22s\033[0m \033[97;1m%s\033[0m\n", k+":", v)
 	}
 
 	ui.Section("Project")
-	kv("Name", cfg.Project.Name)
-	kv("Version", cfg.Project.Version)
+	kv("Name",        cfg.Project.Name)
+	kv("Version",     cfg.Project.Version)
 	kv("Description", cfg.Project.Description)
-	kv("Author", cfg.Project.Author)
-	kv("Base", fmt.Sprintf("Fedora %d (x86_64)", cfg.Project.BaseVersion))
+	kv("Author",      cfg.Project.Author)
+	kv("Base",        fmt.Sprintf("Fedora %d (x86_64)", cfg.Project.BaseVersion))
+	kv("Build mode",  buildModeLabel(cfg))
 
 	ui.Section("System")
 	kv("Hostname", cfg.System.Hostname)
-	kv("Locale", cfg.System.Locale)
+	kv("Locale",   cfg.System.Locale)
 	kv("Timezone", cfg.System.Timezone)
 	kv("Keyboard", cfg.System.Keyboard)
-	kv("SELinux", cfg.System.SELinux)
+	kv("SELinux",  cfg.System.SELinux)
 
 	ui.Section("Desktop")
 	kv("Environment", cfg.Desktop.Environment)
-	kv("Display", cfg.Desktop.DisplayServer)
+	kv("Display",     cfg.Desktop.DisplayServer)
+
+	ui.Section("Boot / Bootloader")
+	kv("boot.bootloader", cfg.Boot.Bootloader)
+	kv("boot.kernel_args", cfg.Boot.KernelArgs)
+	if cfg.Bootloader.Enabled {
+		kv("bootloader.type",       cfg.Bootloader.Type)
+		kv("bootloader.extra_args", cfg.Bootloader.ExtraArgs)
+		if cfg.Bootloader.EFIDir != "" {
+			kv("bootloader.efi_dir", cfg.Bootloader.EFIDir)
+		}
+	} else {
+		kv("bootloader section", "disabled (using boot.bootloader)")
+	}
 
 	ui.Section("Container / bootc")
 	if cfg.Container.Enabled {
@@ -713,8 +837,8 @@ func cmdInfo(_ []string) {
 		if cfg.Container.Repo != "" {
 			kv("Repo", cfg.Container.Repo)
 		}
-		kv("Image tag", imageTag(cfg, uc2))
-		kv("Auto push", fmt.Sprintf("%v", cfg.Container.Push))
+		kv("Image tag",  imageTag(cfg, uc2))
+		kv("Auto push",  fmt.Sprintf("%v", cfg.Container.Push))
 	} else {
 		ui.Info("Container build disabled")
 	}
@@ -723,9 +847,7 @@ func cmdInfo(_ []string) {
 		ui.Section("Branches")
 		for _, b := range cfg.Branches {
 			status := "disabled"
-			if b.Enabled {
-				status = "enabled"
-			}
+			if b.Enabled { status = "enabled" }
 			ui.Info("[%s] %s  desktop=%s  (%s)", b.Name, b.DisplayName, b.Desktop, status)
 		}
 	}
@@ -733,7 +855,7 @@ func cmdInfo(_ []string) {
 	ui.Section("Anaconda")
 	if cfg.Anaconda.Enabled {
 		kv("Product", cfg.Anaconda.ProductName)
-		kv("WebUI", fmt.Sprintf("%v", cfg.Anaconda.WebUI))
+		kv("WebUI",   fmt.Sprintf("%v", cfg.Anaconda.WebUI))
 	} else {
 		ui.Info("Disabled")
 	}
@@ -746,10 +868,10 @@ func cmdInfo(_ []string) {
 		ui.PackageListDisplay("DNF Remove", pkgs)
 	}
 	if pkgs, err := config.ReadPackageList(paths.FlatpakPkgs); err == nil && len(pkgs) > 0 {
-		ui.PackageListDisplay("Flatpak Install", pkgs)
+		ui.PackageListDisplay("Flatpak Install (at install time)", pkgs)
 	}
 	if pkgs, err := config.ReadPackageList(paths.FlatpakRemovePkgs); err == nil && len(pkgs) > 0 {
-		ui.PackageListDisplay("Flatpak Remove", pkgs)
+		ui.PackageListDisplay("Flatpak Remove (at install time)", pkgs)
 	}
 	ui.Newline()
 }
@@ -774,44 +896,52 @@ func cwd() string {
 	return d
 }
 
+// buildModeLabel returns a human-readable build mode string.
+func buildModeLabel(cfg *config.Config) string {
+	if cfg.Project.IsClassic() {
+		return "classic (plain Fedora, mutable)"
+	}
+	return "default (immutable, bootc/ostree)"
+}
+
+// cloudBaseImage returns the base image URL used in the Containerfile.
+func cloudBaseImage(cfg *config.Config) string {
+	if cfg.Project.IsClassic() {
+		return fmt.Sprintf("registry.fedoraproject.org/fedora:%d", cfg.Project.BaseVersion)
+	}
+	return fmt.Sprintf("quay.io/fedora/fedora-bootc:%d", cfg.Project.BaseVersion)
+}
+
 func imageTag(cfg *config.Config, uc *config.UserConfig) string {
 	reg := cfg.Container.Registry
 	img := cfg.Container.Image
 	tag := cfg.Container.Tag
 
 	switch reg {
-	case "", "custom":
-		if uc != nil && uc.Registry() != "" {
-			reg = uc.Registry()
-		} else {
-			reg = "ghcr.io/myorg"
-		}
-	case "repo":
-		if cfg.Container.Repo != "" {
-			if tag == "" {
-				tag = cfg.Project.Version
+		case "", "custom":
+			if uc != nil && uc.Registry() != "" {
+				reg = uc.Registry()
+			} else {
+				reg = "ghcr.io/myorg"
 			}
-			if tag == "" {
-				tag = "latest"
+		case "repo":
+			if cfg.Container.Repo != "" {
+				if tag == "" { tag = cfg.Project.Version }
+				if tag == "" { tag = "latest" }
+				return strings.ToLower(fmt.Sprintf("ghcr.io/%s:%s", cfg.Container.Repo, tag))
 			}
-			return strings.ToLower(fmt.Sprintf("ghcr.io/%s:%s", cfg.Container.Repo, tag))
-		}
-		if uc != nil && uc.Registry() != "" {
-			reg = uc.Registry()
-		} else {
-			reg = "ghcr.io/myorg"
-		}
+			if uc != nil && uc.Registry() != "" {
+				reg = uc.Registry()
+			} else {
+				reg = "ghcr.io/myorg"
+			}
 	}
 
 	if img == "" {
 		img = strings.ReplaceAll(cfg.Project.Name, " ", "-")
 	}
-	if tag == "" {
-		tag = cfg.Project.Version
-	}
-	if tag == "" {
-		tag = "latest"
-	}
+	if tag == "" { tag = cfg.Project.Version }
+	if tag == "" { tag = "latest" }
 	return strings.ToLower(fmt.Sprintf("%s/%s:%s", reg, img, tag))
 }
 
