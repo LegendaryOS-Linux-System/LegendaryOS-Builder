@@ -13,14 +13,22 @@ import (
 
 // CloudBuilder builds an OCI bootc container image using podman.
 //
-// Pipeline:
+// Pipeline (immutable / special_type = "default"):
 //  1. Validate project
 //  2. Prepare build/ dirs
 //  3. Copy repos/ into build context
-//  4. Generate Containerfile  (from config + packages/install.packages + files/ + scripts/)
+//  4. Generate Containerfile
 //  5. podman build --tag <registry/image:tag>
 //  6. (optional) podman push
 //  7. (optional) cosign sign
+//
+// For special_type = "classic" the Containerfile omits the bootc ostree commit
+// and uses a plain Fedora base image instead of fedora-bootc.
+//
+// Note on Flatpak:
+//   flatpak.packages and flatpak.remove.packages are NOT executed during the
+//   container/OCI build. They are consumed by the Anaconda kickstart generator
+//   so that Flatpaks are installed/removed on the target system at install time.
 type CloudBuilder struct {
 	cfg     *config.Config
 	paths   *config.Paths
@@ -39,7 +47,11 @@ func (b *CloudBuilder) Validate() error {
 	if b.cfg.Project.BaseVersion < 44 {
 		return fmt.Errorf("Fedora %d is not supported — minimum is Fedora 44", b.cfg.Project.BaseVersion)
 	}
-	ui.OK("Project valid — Fedora %d / %s", b.cfg.Project.BaseVersion, b.cfg.Project.Arch)
+	mode := "immutable (bootc)"
+	if b.cfg.Project.IsClassic() {
+		mode = "classic (mutable)"
+	}
+	ui.OK("Project valid — Fedora %d / %s / %s", b.cfg.Project.BaseVersion, b.cfg.Project.Arch, mode)
 	return nil
 }
 
@@ -60,10 +72,9 @@ func (b *CloudBuilder) PrepareDirs() error {
 		}
 	}
 
-	// Write storage.conf immediately so login/pull can use it
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
 	content := fmt.Sprintf("[storage]\ndriver = \"overlay\"\ngraphRoot = \"%s/graph\"\nrunRoot = \"%s/run\"\n",
-		storageDir, storageDir)
+			       storageDir, storageDir)
 	if err := os.WriteFile(storageCfg, []byte(content), 0644); err != nil {
 		return fmt.Errorf("cannot write storage.conf: %w", err)
 	}
@@ -73,8 +84,7 @@ func (b *CloudBuilder) PrepareDirs() error {
 	return nil
 }
 
-// CopyRepos copies *.repo files from repos/ into the build context so the
-// Containerfile can reference them with a COPY instruction.
+// CopyRepos copies *.repo files from repos/ into the build context.
 func (b *CloudBuilder) CopyRepos() error {
 	if _, err := os.Stat(b.paths.ReposDir); os.IsNotExist(err) {
 		ui.Info("No repos/ directory — using base image defaults")
@@ -104,6 +114,9 @@ func (b *CloudBuilder) CopyRepos() error {
 }
 
 // GenerateContainerfile renders the Containerfile and writes it to build/Containerfile.
+// The Containerfile differs depending on special_type:
+//   - "default" (immutable): uses fedora-bootc base, ends with `ostree container commit`
+//   - "classic":             uses plain fedora base, no ostree commit
 func (b *CloudBuilder) GenerateContainerfile(platform string) error {
 	installPkgs, err := config.ReadPackageList(b.paths.InstallPkgs)
 	if err != nil {
@@ -113,16 +126,17 @@ func (b *CloudBuilder) GenerateContainerfile(platform string) error {
 	if err != nil {
 		return fmt.Errorf("cannot read remove.packages: %w", err)
 	}
-	flatpakPkgs, err := config.ReadPackageList(b.paths.FlatpakPkgs)
-	if err != nil {
-		return fmt.Errorf("cannot read flatpak.packages: %w", err)
-	}
-	flatpakRemove, err := config.ReadPackageList(b.paths.FlatpakRemovePkgs)
-	if err != nil {
-		return fmt.Errorf("cannot read flatpak.remove.packages: %w", err)
-	}
 
-	cf := b.renderContainerfile(installPkgs, removePkgs, flatpakPkgs, flatpakRemove, platform)
+	// Note: flatpak.packages and flatpak.remove.packages are intentionally
+	// NOT processed here — they belong to the Anaconda kickstart (install-time),
+	// not to the container image build.
+
+	var cf string
+	if b.cfg.Project.IsClassic() {
+		cf = b.renderClassicContainerfile(installPkgs, removePkgs, platform)
+	} else {
+		cf = b.renderImmutableContainerfile(installPkgs, removePkgs, platform)
+	}
 
 	cfPath := filepath.Join(b.paths.BuildDir, "Containerfile")
 	if err := os.WriteFile(cfPath, []byte(cf), 0644); err != nil {
@@ -141,18 +155,39 @@ func (b *CloudBuilder) GenerateContainerfile(platform string) error {
 	if len(removePkgs) > 0 {
 		ui.PackageListDisplay("Will remove (DNF)", removePkgs)
 	}
-	if len(flatpakPkgs) > 0 {
-		ui.PackageListDisplay("Will install (Flatpak)", flatpakPkgs)
+
+	// Inform user that flatpak entries are handled at install time.
+	flatpakInstall, _ := config.ReadPackageList(b.paths.FlatpakPkgs)
+	flatpakRemove, _  := config.ReadPackageList(b.paths.FlatpakRemovePkgs)
+	if len(flatpakInstall) > 0 {
+		ui.Info("Flatpak install (%d apps) → will be applied by Anaconda at install time", len(flatpakInstall))
 	}
 	if len(flatpakRemove) > 0 {
-		ui.PackageListDisplay("Will remove (Flatpak)", flatpakRemove)
+		ui.Info("Flatpak remove  (%d apps) → will be applied by Anaconda at install time", len(flatpakRemove))
 	}
+
 	return nil
 }
 
-func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flatpakRemove []string, platform string) string {
+// ── Containerfile renderers ───────────────────────────────────────────────────
+
+// renderImmutableContainerfile generates a Containerfile for a bootc/ostree image.
+func (b *CloudBuilder) renderImmutableContainerfile(install, remove []string, platform string) string {
 	cfg := b.cfg
 	base := fmt.Sprintf("quay.io/fedora/fedora-bootc:%d", cfg.Project.BaseVersion)
+	return b.renderContainerfileBody(install, remove, platform, base, true)
+}
+
+// renderClassicContainerfile generates a Containerfile for a plain Fedora image.
+// No ostree commit at the end — this is a standard mutable container/OS image.
+func (b *CloudBuilder) renderClassicContainerfile(install, remove []string, platform string) string {
+	cfg := b.cfg
+	base := fmt.Sprintf("registry.fedoraproject.org/fedora:%d", cfg.Project.BaseVersion)
+	return b.renderContainerfileBody(install, remove, platform, base, false)
+}
+
+func (b *CloudBuilder) renderContainerfileBody(install, remove []string, platform, base string, immutable bool) string {
+	cfg := b.cfg
 
 	var sb strings.Builder
 	line := func(s string, a ...interface{}) {
@@ -163,36 +198,43 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		}
 	}
 	comment := func(s string) { line("# " + s) }
-	blank := func() { line("") }
+	blank   := func()         { line("") }
 
 	comment("╔══════════════════════════════════════════════════════════════╗")
 	comment("║  Generated by LegendaryOS Builder — DO NOT EDIT MANUALLY   ║")
 	comment("║  Regenerate with: legendaryos build cloud                   ║")
+	if immutable {
+		comment("║  Mode: immutable (bootc / ostree)                           ║")
+	} else {
+		comment("║  Mode: classic (plain Fedora, mutable)                      ║")
+	}
 	comment("╚══════════════════════════════════════════════════════════════╝")
 	blank()
 
-	// FROM
 	line("FROM --platform=%s %s", platform, base)
 	blank()
 
-	// Labels
 	comment("── Labels ───────────────────────────────────────────────────────")
 	line("LABEL org.opencontainers.image.title=%q", cfg.Project.Name)
 	line("LABEL org.opencontainers.image.version=%q", cfg.Project.Version)
 	line("LABEL org.opencontainers.image.description=%q", cfg.Project.Description)
 	line("LABEL org.opencontainers.image.licenses=%q", cfg.Project.License)
 	line("LABEL com.legendaryos.builder.version=\"1.0.0\"")
+	if immutable {
+		line("LABEL com.legendaryos.special_type=\"default\"")
+	} else {
+		line("LABEL com.legendaryos.special_type=\"classic\"")
+	}
 	blank()
 
 	// Custom repos
 	if hasDir(b.paths.ReposDir) {
 		comment("── Custom repositories ────────────────────────────────────────────")
-		comment("  Copied from repos/ by legendaryos into build/context/repos/")
 		line("COPY build/context/repos/ /etc/yum.repos.d/")
 		blank()
 	}
 
-	// Local RPMs from packages/
+	// Local RPMs
 	if hasDir(b.paths.PackagesDir) {
 		comment("── Local RPM packages (packages/) ─────────────────────────────────")
 		line("COPY packages/ /tmp/los-rpms/")
@@ -201,10 +243,9 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		blank()
 	}
 
-	// scripts/before/ — run BEFORE package install
+	// scripts/before/
 	if hasDir(b.paths.ScriptsBefore) {
 		comment("── scripts/before/ — run BEFORE package install ───────────────────")
-		comment("  .sh → bash   .py → python3   .pl → perl   .rb → ruby")
 		line("COPY scripts/before/ /tmp/los-scripts-before/")
 		line("RUN set -eux \\")
 		line("    && for f in $(ls /tmp/los-scripts-before/*.sh  2>/dev/null | sort); do bash    \"$f\"; done \\")
@@ -234,6 +275,18 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		blank()
 	}
 
+	// Bootloader packages (when [bootloader] section is enabled)
+	if cfg.Bootloader.Enabled && len(cfg.Bootloader.InstallPackages) > 0 {
+		comment("── Bootloader packages ([bootloader] section) ─────────────────────")
+		line("RUN dnf install -y --skip-unavailable \\")
+		for _, pkg := range cfg.Bootloader.InstallPackages {
+			line("    %s \\", pkg)
+		}
+		line("    && dnf clean all \\")
+		line("    && rm -rf /var/cache/dnf")
+		blank()
+	}
+
 	// Remove packages
 	if len(remove) > 0 {
 		comment("── Remove packages (packages/remove.packages) ─────────────────────")
@@ -255,10 +308,9 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		blank()
 	}
 
-	// scripts/after/ — run AFTER package install
+	// scripts/after/
 	if hasDir(b.paths.ScriptsAfter) {
 		comment("── scripts/after/ — run AFTER package install ─────────────────────")
-		comment("  .sh → bash   .py → python3   .pl → perl   .rb → ruby")
 		line("COPY scripts/after/ /tmp/los-scripts-after/")
 		line("RUN set -eux \\")
 		line("    && for f in $(ls /tmp/los-scripts-after/*.sh  2>/dev/null | sort); do bash    \"$f\"; done \\")
@@ -269,36 +321,11 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		blank()
 	}
 
-	// Flatpak — install from packages/flatpak.packages
-	if len(flatpakInstall) > 0 || len(flatpakRemove) > 0 {
-		comment("── Flatpak (packages/flatpak.packages) ────────────────────────────")
-		line("RUN flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo 2>/dev/null || true")
-		blank()
-	}
-	if len(flatpakInstall) > 0 {
-		comment("── Flatpak install ──────────────────────────────────────────────────")
-		line("RUN flatpak install --system --noninteractive flathub \\")
-		for i, app := range flatpakInstall {
-			if i < len(flatpakInstall)-1 {
-				line("    %s \\", app)
-			} else {
-				line("    %s", app)
-			}
-		}
-		blank()
-	}
-	if len(flatpakRemove) > 0 {
-		comment("── Flatpak remove ───────────────────────────────────────────────────")
-		line("RUN flatpak uninstall --system --noninteractive \\")
-		for i, app := range flatpakRemove {
-			if i < len(flatpakRemove)-1 {
-				line("    %s \\", app)
-			} else {
-				line("    %s", app)
-			}
-		}
-		blank()
-	}
+	// NOTE: Flatpak packages are intentionally omitted here.
+	// They are handled by the Anaconda kickstart at system install time.
+	comment("── NOTE: Flatpak packages are applied at install time via Anaconda ──")
+	comment("        See packages/flatpak.packages and packages/flatpak.remove.packages")
+	blank()
 
 	// System configuration
 	comment("── System configuration ────────────────────────────────────────────")
@@ -327,28 +354,24 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		line("RUN systemctl enable firewalld.service 2>/dev/null || true")
 	}
 
-	// ── os-release — BIB requires both ID= and VERSION_ID= ──────────────────
-	//
-	// bootc-image-builder manifest generation fails with:
-	//   "missing VERSION_ID in os-release"
-	// when the field is absent from /etc/os-release inside the container image.
-	//
-	// The base fedora-bootc image ships with VERSION_ID set, but custom
-	// layers or in-container edits can accidentally strip it.
-	// We defensively ensure all required fields are present:
-	//   ID=          (distro id, must stay "fedora" for BIB)
-	//   VERSION_ID=  (numeric version, e.g. "44"  — BIB reads this for osbuild)
-	//
-	// We also append VARIANT fields so the installed OS self-identifies
-	// as LegendaryOS rather than plain Fedora.
-	comment("── os-release — ensure ID= and VERSION_ID= required by bootc-image-builder ─")
-	comment("  BIB manifest generation fails if either field is missing.")
+	// Bootloader configuration inside the image
+	if cfg.Bootloader.Enabled {
+		b.renderBootloaderSteps(&sb, line, comment, blank)
+	}
+
+	// os-release
+	comment("── os-release ────────────────────────────────────────────────────────")
+	comment("  Ensure ID= and VERSION_ID= are present (required by bootc-image-builder)")
 	line("RUN grep -q '^ID=' /etc/os-release || echo 'ID=fedora' >> /etc/os-release")
 	line("RUN grep -q '^VERSION_ID=' /etc/os-release || echo 'VERSION_ID=%d' >> /etc/os-release", cfg.Project.BaseVersion)
 	if cfg.Project.Name != "" {
 		variantID := strings.ToLower(strings.ReplaceAll(cfg.Project.Name, " ", "-"))
 		line("RUN grep -q '^VARIANT=' /etc/os-release    || echo 'VARIANT=%s'    >> /etc/os-release", cfg.Project.Name)
 		line("RUN grep -q '^VARIANT_ID=' /etc/os-release || echo 'VARIANT_ID=%s' >> /etc/os-release", variantID)
+	}
+	// Classic mode marker
+	if !immutable {
+		line("RUN grep -q '^VARIANT_PLATFORM=' /etc/os-release || echo 'VARIANT_PLATFORM=classic' >> /etc/os-release")
 	}
 	blank()
 
@@ -361,11 +384,67 @@ func (b *CloudBuilder) renderContainerfile(install, remove, flatpakInstall, flat
 		blank()
 	}
 
-	// bootc commit — MUST be last
-	comment("── bootc: commit ostree layer — MUST be the last RUN ───────────────")
-	line("RUN ostree container commit")
+	// bootc commit only for immutable builds
+	if immutable {
+		comment("── bootc: commit ostree layer — MUST be the last RUN ───────────────")
+		line("RUN ostree container commit")
+	} else {
+		comment("── classic build: no ostree commit ─────────────────────────────────")
+		comment("  This image is a standard mutable Fedora container.")
+		comment("  Use it as a base for ISO builds or as a container image directly.")
+	}
 
 	return sb.String()
+}
+
+// renderBootloaderSteps appends bootloader-specific RUN instructions.
+func (b *CloudBuilder) renderBootloaderSteps(
+	_ *strings.Builder,
+	line func(string, ...interface{}),
+					     comment func(string),
+					     blank func(),
+) {
+	cfg := b.cfg
+	bl := cfg.Bootloader.Type
+	comment(fmt.Sprintf("── Bootloader: %s ──────────────────────────────────────────────────", bl))
+
+	switch strings.ToLower(bl) {
+		case config.BootloaderRefind:
+			comment("  rEFInd — EFI boot manager")
+			line("RUN dnf install -y refind 2>/dev/null || true")
+			efi := cfg.Bootloader.EFIDir
+			if efi == "" {
+				efi = "/boot/efi"
+			}
+			line("RUN refind-install --usedefault %s 2>/dev/null || true", efi)
+
+		case config.BootloaderLimine:
+			comment("  Limine — modern bootloader")
+			line("RUN dnf install -y limine 2>/dev/null || true")
+
+		case config.BootloaderSystemd:
+			comment("  systemd-boot (sd-boot)")
+			line("RUN dnf install -y systemd-boot-unsigned efi-filesystem 2>/dev/null || true")
+			line("RUN bootctl install 2>/dev/null || true")
+
+		case config.BootloaderSyslinux:
+			comment("  SYSLINUX / ISOLINUX")
+			line("RUN dnf install -y syslinux syslinux-extlinux 2>/dev/null || true")
+
+		case config.BootloaderGRUB2, "grub", "":
+			comment("  GRUB 2 (default)")
+			line("RUN dnf install -y grub2 grub2-efi-x64 shim 2>/dev/null || true")
+			line("RUN grub2-mkconfig -o /boot/grub2/grub.cfg 2>/dev/null || true")
+
+		default:
+			comment(fmt.Sprintf("  Custom bootloader: %s — no automatic setup steps", bl))
+	}
+
+	if cfg.Bootloader.ExtraArgs != "" {
+		comment("  Extra kernel args for this bootloader")
+		line("RUN sed -i 's/^GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"%s /' /etc/default/grub 2>/dev/null || true", cfg.Bootloader.ExtraArgs)
+	}
+	blank()
 }
 
 // RegistryLogin logs into the OCI registry using podman login.
@@ -381,9 +460,9 @@ func (b *CloudBuilder) RegistryLogin(registry, username, token string) error {
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
 	env := append(os.Environ(), "CONTAINERS_STORAGE_CONF="+storageCfg)
 	return b.runEnv(env, "podman", "login",
-		"--username", username,
-		"--password", token,
-		registry,
+			"--username", username,
+		 "--password", token,
+		 registry,
 	)
 }
 
@@ -405,8 +484,8 @@ func (b *CloudBuilder) PodmanBuild(tag string, noCache bool) error {
 	storageDir := b.paths.PodmanStorage
 	env := os.Environ()
 	env = append(env,
-		"CONTAINERS_STORAGE_CONF="+storageCfg,
-		"TMPDIR="+filepath.Join(storageDir, "tmp"),
+		     "CONTAINERS_STORAGE_CONF="+storageCfg,
+	      "TMPDIR="+filepath.Join(storageDir, "tmp"),
 	)
 
 	return b.runEnv(env, "podman", args...)
@@ -477,10 +556,10 @@ func (b *CloudBuilder) RunPreScripts() error {
 		ui.Info("[pre] %s  (%s)", e.Name(), interp)
 		cmd := exec.Command(interp, scriptPath)
 		cmd.Env = append(os.Environ(),
-			"LEGENDARYOS_PROJECT="+b.cfg.Project.Name,
-			"LEGENDARYOS_VERSION="+b.cfg.Project.Version,
-			"LEGENDARYOS_BUILD="+b.paths.BuildDir,
-			"LEGENDARYOS_ROOT="+b.paths.Root,
+				 "LEGENDARYOS_PROJECT="+b.cfg.Project.Name,
+		   "LEGENDARYOS_VERSION="+b.cfg.Project.Version,
+		   "LEGENDARYOS_BUILD="+b.paths.BuildDir,
+		   "LEGENDARYOS_ROOT="+b.paths.Root,
 		)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
