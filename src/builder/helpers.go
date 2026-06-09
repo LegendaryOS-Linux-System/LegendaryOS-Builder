@@ -8,7 +8,9 @@ import (
 )
 
 // generateKickstart produces a full Anaconda kickstart from project config.
-func generateKickstart(cfg *config.Config) (string, error) {
+// Flatpak installs/removals are executed in %post since they operate on the
+// live installed system, not inside the container image.
+func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) {
 	var sb strings.Builder
 	line := func(s string, a ...interface{}) {
 		if len(a) > 0 {
@@ -17,7 +19,7 @@ func generateKickstart(cfg *config.Config) (string, error) {
 			sb.WriteString(s + "\n")
 		}
 	}
-	blank  := func() { line("") }
+	blank   := func() { line("") }
 	comment := func(s string) { line("# " + s) }
 
 	comment("╔══════════════════════════════════════════════════════════════╗")
@@ -49,19 +51,46 @@ func generateKickstart(cfg *config.Config) (string, error) {
 
 	// ── Bootloader ────────────────────────────────────────────────────────
 	kernelArgs := orDefault(cfg.Boot.KernelArgs, "quiet splash")
+	// Append [bootloader] extra_args when section is active
+	if cfg.Bootloader.Enabled && cfg.Bootloader.ExtraArgs != "" {
+		if !strings.Contains(kernelArgs, cfg.Bootloader.ExtraArgs) {
+			kernelArgs += " " + cfg.Bootloader.ExtraArgs
+		}
+	}
 	// If NVIDIA KMS is enabled, add the required kernel parameters
 	if cfg.Nvidia.Enabled && cfg.Nvidia.EnableKMS {
 		if !strings.Contains(kernelArgs, "nvidia-drm.modeset") {
 			kernelArgs += " nvidia-drm.modeset=1 nvidia-drm.fbdev=1"
 		}
 	}
-	line("bootloader --location=mbr --append=%q", kernelArgs)
+
+	// Select kickstart bootloader directive based on resolved bootloader type
+	resolvedBL := cfg.ResolvedBootloader()
+	switch strings.ToLower(resolvedBL) {
+	case config.BootloaderSystemd:
+		line("bootloader --location=none --boot-drive=sda")
+		comment("  systemd-boot: bootctl will be used in %%post")
+	case config.BootloaderRefind:
+		line("bootloader --location=none --boot-drive=sda")
+		comment("  rEFInd: refind-install will be used in %%post")
+	default:
+		line("bootloader --location=mbr --append=%q", kernelArgs)
+	}
 	blank()
 
 	// ── Disk partitioning ─────────────────────────────────────────────────
 	line("zerombr")
 	line("clearpart --all --initlabel")
-	line("autopart --type=lvm")
+	switch strings.ToLower(resolvedBL) {
+	case config.BootloaderSystemd, config.BootloaderRefind:
+		line("part /boot/efi --fstype=efi  --size=512")
+		line("part /boot     --fstype=ext4 --size=1024")
+		line("part pv.01     --grow")
+		line("volgroup vg_root pv.01")
+		line("logvol /  --vgname=vg_root --size=1 --grow --fstype=%s --name=lv_root", cfg.Build.Filesystem)
+	default:
+		line("autopart --type=lvm")
+	}
 	blank()
 
 	// ── Security ──────────────────────────────────────────────────────────
@@ -87,7 +116,6 @@ func generateKickstart(cfg *config.Config) (string, error) {
 	blank()
 
 	// ── Additional repos needed at install time ───────────────────────────
-	// RPM Fusion is needed for NVIDIA drivers
 	if cfg.Nvidia.Enabled {
 		comment("── RPM Fusion repos (required for NVIDIA drivers) ───────────────")
 		line("repo --name=rpmfusion-free --baseurl=https://download1.rpmfusion.org/free/fedora/releases/%d/Everything/x86_64/os/", cfg.Project.BaseVersion)
@@ -96,38 +124,51 @@ func generateKickstart(cfg *config.Config) (string, error) {
 	}
 
 	// ── %packages ─────────────────────────────────────────────────────────
-	if cfg.Nvidia.Enabled {
+	if cfg.Nvidia.Enabled || cfg.Bootloader.Enabled {
 		comment("── Packages installed by Anaconda ───────────────────────────────")
 		line("%%packages")
-		comment("NVIDIA proprietary driver via akmod (compiles module on first boot)")
-		comment("akmod-nvidia supports ALL NVIDIA GPUs from Kepler (GTX 600) onward")
-		line("akmod-nvidia")
-		line("xorg-x11-drv-nvidia")
-		line("xorg-x11-drv-nvidia-libs")
-		line("xorg-x11-drv-nvidia-libs.i686")   // 32-bit libs for Steam/Wine
-		if cfg.Nvidia.OpenDriver {
-			comment("nvidia-open: open-source kernel module (Turing+ / RTX 20xx+)")
-			line("akmod-nvidia-open")
+		if cfg.Nvidia.Enabled {
+			comment("NVIDIA proprietary driver via akmod")
+			line("akmod-nvidia")
+			line("xorg-x11-drv-nvidia")
+			line("xorg-x11-drv-nvidia-libs")
+			line("xorg-x11-drv-nvidia-libs.i686")
+			if cfg.Nvidia.OpenDriver {
+				line("akmod-nvidia-open")
+			}
+			if cfg.Nvidia.InstallCUDA {
+				line("xorg-x11-drv-nvidia-cuda")
+				line("xorg-x11-drv-nvidia-cuda-libs")
+			}
+			if cfg.Nvidia.InstallNVIDIASettings {
+				line("nvidia-settings")
+			}
+			if cfg.Nvidia.InstallVAAPI {
+				line("nvidia-vaapi-driver")
+			}
+			if cfg.Nvidia.InstallVulkan {
+				line("vulkan-loader")
+				line("vulkan-headers")
+			}
+			line("xorg-x11-drv-nvidia-power")
 		}
-		if cfg.Nvidia.InstallCUDA {
-			comment("CUDA toolkit — large download, needed for ML/AI/compute workloads")
-			line("xorg-x11-drv-nvidia-cuda")
-			line("xorg-x11-drv-nvidia-cuda-libs")
+		if cfg.Bootloader.Enabled {
+			switch strings.ToLower(cfg.Bootloader.Type) {
+			case config.BootloaderRefind:
+				line("refind")
+			case config.BootloaderLimine:
+				line("limine")
+			case config.BootloaderSystemd:
+				line("systemd-boot-unsigned")
+				line("efi-filesystem")
+			case config.BootloaderSyslinux:
+				line("syslinux")
+				line("syslinux-extlinux")
+			}
+			for _, pkg := range cfg.Bootloader.InstallPackages {
+				line("%s", pkg)
+			}
 		}
-		if cfg.Nvidia.InstallNVIDIASettings {
-			line("nvidia-settings")
-		}
-		if cfg.Nvidia.InstallVAAPI {
-			comment("VAAPI driver — hardware-accelerated video decode (Firefox, MPV, etc.)")
-			line("nvidia-vaapi-driver")
-		}
-		if cfg.Nvidia.InstallVulkan {
-			comment("Vulkan ICD for NVIDIA")
-			line("vulkan-loader")
-			line("vulkan-headers")
-		}
-		comment("Power management for NVIDIA (suspend/resume)")
-		line("xorg-x11-drv-nvidia-power")
 		line("%%end")
 		blank()
 	}
@@ -141,10 +182,27 @@ func generateKickstart(cfg *config.Config) (string, error) {
 		line("echo 'VARIANT_ID=%q' >> /etc/os-release",
 			strings.ToLower(strings.ReplaceAll(cfg.Project.Name, " ", "-")))
 	}
+	if cfg.Project.IsClassic() {
+		line("echo 'VARIANT_PLATFORM=classic' >> /etc/os-release")
+	}
 	blank()
 
 	if cfg.Nvidia.Enabled {
 		sb.WriteString(nvidiaPostScript(cfg))
+	}
+
+	if cfg.Bootloader.Enabled {
+		sb.WriteString(bootloaderPostScript(cfg))
+	}
+
+	// Flatpak — applied at install time via %post, NOT during container build
+	var flatpakInstall, flatpakRemove []string
+	if paths != nil {
+		flatpakInstall, _ = config.ReadPackageList(paths.FlatpakPkgs)
+		flatpakRemove, _  = config.ReadPackageList(paths.FlatpakRemovePkgs)
+	}
+	if len(flatpakInstall) > 0 || len(flatpakRemove) > 0 {
+		sb.WriteString(flatpakPostScript(flatpakInstall, flatpakRemove))
 	}
 
 	line("%%end")
@@ -166,17 +224,15 @@ func nvidiaPostScript(cfg *config.Config) string {
 		}
 	}
 	comment := func(s string) { line("# " + s) }
-	blank := func() { line("") }
+	blank   := func()         { line("") }
 
 	comment("╔══════════════════════════════════════════════════════════════╗")
 	comment("║  NVIDIA proprietary driver setup                             ║")
 	comment("╚══════════════════════════════════════════════════════════════╝")
 	blank()
 
-	// 1. Blacklist nouveau
 	if cfg.Nvidia.BlacklistNouveau {
-		comment("── Blacklist nouveau (open-source NVIDIA driver) ────────────────")
-		comment("  nouveau must not load alongside the proprietary driver.")
+		comment("── Blacklist nouveau ────────────────────────────────────────────")
 		line("cat > /etc/modprobe.d/blacklist-nouveau.conf << 'EOF'")
 		line("# Blacklisted by LegendaryOS Builder — NVIDIA proprietary driver in use")
 		line("blacklist nouveau")
@@ -191,11 +247,8 @@ func nvidiaPostScript(cfg *config.Config) string {
 		blank()
 	}
 
-	// 2. KMS (Kernel Mode Setting) — required for Wayland
 	if cfg.Nvidia.EnableKMS {
 		comment("── NVIDIA KMS — required for Wayland support ────────────────────")
-		comment("  nvidia-drm.modeset=1 enables the DRM kernel mode setting.")
-		comment("  nvidia-drm.fbdev=1   enables framebuffer for console (Fedora 40+).")
 		line("cat > /etc/modprobe.d/nvidia-kms.conf << 'EOF'")
 		line("# NVIDIA KMS — enabled by LegendaryOS Builder")
 		line("options nvidia-drm modeset=1 fbdev=1")
@@ -203,7 +256,6 @@ func nvidiaPostScript(cfg *config.Config) string {
 		blank()
 	}
 
-	// 3. nvidia-modprobe config
 	comment("── nvidia-modprobe — allow non-root apps to use GPU ─────────────")
 	line("cat > /etc/modprobe.d/nvidia.conf << 'EOF'")
 	line("# NVIDIA options — LegendaryOS Builder")
@@ -212,27 +264,18 @@ func nvidiaPostScript(cfg *config.Config) string {
 	line("EOF")
 	blank()
 
-	// 4. NVIDIA power management (needed for proper suspend/resume)
 	comment("── NVIDIA power management ───────────────────────────────────────")
-	comment("  Enables suspend/resume support — important for laptops.")
 	line("systemctl enable nvidia-suspend.service  2>/dev/null || true")
 	line("systemctl enable nvidia-hibernate.service 2>/dev/null || true")
 	line("systemctl enable nvidia-resume.service   2>/dev/null || true")
 	blank()
 
-	// 5. akmods — wait for module compilation on first boot
 	comment("── akmods — compile NVIDIA kernel module on first boot ───────────")
-	comment("  akmod-nvidia compiles the driver for the installed kernel.")
-	comment("  This runs automatically on first boot — takes 1-3 minutes.")
-	comment("  The system may appear to hang during first boot — this is normal.")
 	line("systemctl enable akmods.service 2>/dev/null || true")
 	blank()
 
-	// 6. VAAPI
 	if cfg.Nvidia.InstallVAAPI {
 		comment("── NVIDIA VAAPI driver ───────────────────────────────────────────")
-		comment("  Enables hardware-accelerated video decode in:")
-		comment("  Firefox, Chromium, MPV, VLC, GStreamer pipelines.")
 		line("cat >> /etc/environment << 'EOF'")
 		line("# NVIDIA VAAPI — LegendaryOS")
 		line("LIBVA_DRIVER_NAME=nvidia")
@@ -240,9 +283,7 @@ func nvidiaPostScript(cfg *config.Config) string {
 		blank()
 	}
 
-	// 7. Wayland environment
 	comment("── Wayland + NVIDIA environment ──────────────────────────────────")
-	comment("  These env vars ensure Wayland apps use the NVIDIA GPU.")
 	line("cat >> /etc/environment << 'EOF'")
 	line("# NVIDIA Wayland — LegendaryOS")
 	line("GBM_BACKEND=nvidia-drm")
@@ -252,7 +293,6 @@ func nvidiaPostScript(cfg *config.Config) string {
 	line("EOF")
 	blank()
 
-	// 8. udev rule — allow users in 'video' group to access NVIDIA devices
 	comment("── udev — NVIDIA device permissions ─────────────────────────────")
 	line("cat > /etc/udev/rules.d/70-nvidia.rules << 'EOF'")
 	line("# NVIDIA device permissions — LegendaryOS Builder")
@@ -268,13 +308,10 @@ func nvidiaPostScript(cfg *config.Config) string {
 	line("EOF")
 	blank()
 
-	// 9. Regenerate initramfs with NVIDIA modules included
 	comment("── Regenerate initramfs with NVIDIA modules ──────────────────────")
-	comment("  This ensures NVIDIA is available at early boot.")
 	line("dracut --force 2>/dev/null || true")
 	blank()
 
-	// 10. Detection info for user
 	comment("── GPU detection info (written to /etc/legendaryos-nvidia.conf) ──")
 	line("GPU_INFO=$(lspci -nn | grep -i 'vga\\|3d\\|display' | grep -i nvidia || echo 'NVIDIA GPU not detected at install time')")
 	line("cat > /etc/legendaryos-nvidia.conf << EOF")
@@ -288,10 +325,10 @@ func nvidiaPostScript(cfg *config.Config) string {
 	line("# KMS            : enabled (nvidia-drm.modeset=1)")
 	line("# Wayland        : supported")
 	if cfg.Nvidia.InstallVAAPI {
-	line("# VAAPI          : enabled (LIBVA_DRIVER_NAME=nvidia)")
+		line("# VAAPI          : enabled (LIBVA_DRIVER_NAME=nvidia)")
 	}
 	if cfg.Nvidia.InstallCUDA {
-	line("# CUDA           : installed")
+		line("# CUDA           : installed")
 	}
 	line("EOF")
 	blank()
@@ -299,7 +336,6 @@ func nvidiaPostScript(cfg *config.Config) string {
 	comment("── NVIDIA setup complete ─────────────────────────────────────────")
 	comment("  First boot will compile the kernel module (~2-3 min).")
 	comment("  After reboot: nvidia-smi should show your GPU.")
-	comment("  Wayland session: KDE Plasma will use NVIDIA via KMS.")
 
 	return sb.String()
 }
