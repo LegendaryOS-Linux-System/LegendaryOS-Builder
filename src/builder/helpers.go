@@ -69,10 +69,10 @@ func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) 
 	switch strings.ToLower(resolvedBL) {
 	case config.BootloaderSystemd:
 		line("bootloader --location=none --boot-drive=sda")
-		comment("  systemd-boot: bootctl will be used in %%post")
+		comment("  systemd-boot: bootctl will be used in %post")
 	case config.BootloaderRefind:
 		line("bootloader --location=none --boot-drive=sda")
-		comment("  rEFInd: refind-install will be used in %%post")
+		comment("  rEFInd: refind-install will be used in %post")
 	default:
 		line("bootloader --location=mbr --append=%q", kernelArgs)
 	}
@@ -126,7 +126,7 @@ func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) 
 	// ── %packages ─────────────────────────────────────────────────────────
 	if cfg.Nvidia.Enabled || cfg.Bootloader.Enabled {
 		comment("── Packages installed by Anaconda ───────────────────────────────")
-		line("%%packages")
+		line("%packages")
 		if cfg.Nvidia.Enabled {
 			comment("NVIDIA proprietary driver via akmod")
 			line("akmod-nvidia")
@@ -169,12 +169,12 @@ func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) 
 				line("%s", pkg)
 			}
 		}
-		line("%%end")
+		line("%end")
 		blank()
 	}
 
 	// ── %post ─────────────────────────────────────────────────────────────
-	line("%%post")
+	line("%post")
 	comment("── OS identity ──────────────────────────────────────────────────")
 	line("echo '# Installed by LegendaryOS Builder' >> /etc/os-release")
 	if cfg.Project.Name != "" {
@@ -205,8 +205,7 @@ func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) 
 		sb.WriteString(flatpakPostScript(flatpakInstall, flatpakRemove))
 	}
 
-	line("%%end")
-	blank()
+	line("%end")	blank()
 	line("reboot")
 
 	return sb.String(), nil
