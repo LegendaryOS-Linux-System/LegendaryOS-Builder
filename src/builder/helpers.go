@@ -205,7 +205,8 @@ func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) 
 		sb.WriteString(flatpakPostScript(flatpakInstall, flatpakRemove))
 	}
 
-	line("%end")	blank()
+	line("%end")
+	blank()
 	line("reboot")
 
 	return sb.String(), nil
