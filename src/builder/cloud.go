@@ -321,6 +321,28 @@ func (b *CloudBuilder) renderContainerfileBody(install, remove []string, platfor
 		blank()
 	}
 
+	// images/ — Anaconda installer branding assets
+	// Place in images/:
+	//   logo.png   → replaces the Fedora logo in the installer sidebar
+	//   banner.png → replaces the blue sidebar background banner
+	if hasDir(b.paths.ImagesDir) {
+		comment("── Anaconda installer branding (images/) ──────────────────────────")
+		comment("  logo.png   → /usr/share/anaconda/pixmaps/sidebar-logo.png")
+		comment("  banner.png → /usr/share/anaconda/pixmaps/sidebar-bg.png")
+		// Copy into the image; Anaconda picks them up from these paths.
+		// Both png files are optional — only copy what exists.
+		line("COPY images/ /tmp/los-images/")
+		line("RUN set -eux \\")
+		line("    && if [ -f /tmp/los-images/logo.png ]; then \\")
+		line("         install -Dm644 /tmp/los-images/logo.png /usr/share/anaconda/pixmaps/sidebar-logo.png; \\")
+		line("       fi \\")
+		line("    && if [ -f /tmp/los-images/banner.png ]; then \\")
+		line("         install -Dm644 /tmp/los-images/banner.png /usr/share/anaconda/pixmaps/sidebar-bg.png; \\")
+		line("       fi \\")
+		line("    && rm -rf /tmp/los-images")
+		blank()
+	}
+
 	// NOTE: Flatpak packages are intentionally omitted here.
 	// They are handled by the Anaconda kickstart at system install time.
 	comment("── NOTE: Flatpak packages are applied at install time via Anaconda ──")
@@ -495,7 +517,14 @@ func (b *CloudBuilder) PodmanPush(tag string) error {
 	ui.Info("Pushing: %s", tag)
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
 	env := append(os.Environ(), "CONTAINERS_STORAGE_CONF="+storageCfg)
-	return b.runEnv(env, "podman", "push", tag)
+	// --compression-format=gzip is required to preserve ostree layer annotations
+	// (ostree.final-diffid etc.) that BIB needs to deploy the image.
+	// zstd (podman default since Fedora 38) strips these annotations and causes
+	// "Missing ostree.final-diffid" errors during Anaconda installation.
+	return b.runEnv(env, "podman", "push",
+		"--compression-format=gzip",
+		tag,
+	)
 }
 
 func (b *CloudBuilder) CosignSign(tag string) error {
