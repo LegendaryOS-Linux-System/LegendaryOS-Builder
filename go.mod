@@ -1,3 +1,3 @@
-module github.com/legendaryos/builder
+module legendaryos-builder
 
 go 1.22
