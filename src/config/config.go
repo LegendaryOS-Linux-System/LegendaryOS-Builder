@@ -236,6 +236,7 @@ type Paths struct {
 	FilesDir          string
 	FilesAfter        string
 	FilesBefore       string
+	ImagesDir         string
 	ScriptsDir        string
 	ScriptsPre        string
 	ScriptsBefore     string
@@ -259,6 +260,7 @@ func GetPaths(root string) *Paths {
 		FilesDir:          filepath.Join(root, "files"),
 		FilesAfter:        filepath.Join(root, "files", "after"),
 		FilesBefore:       filepath.Join(root, "files", "before"),
+		ImagesDir:         filepath.Join(root, "images"),
 		ScriptsDir:        filepath.Join(root, "scripts"),
 		ScriptsPre:        filepath.Join(root, "scripts", "pre"),
 		ScriptsBefore:     filepath.Join(root, "scripts", "before"),
