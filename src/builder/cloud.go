@@ -321,16 +321,11 @@ func (b *CloudBuilder) renderContainerfileBody(install, remove []string, platfor
 		blank()
 	}
 
-	// images/ — Anaconda installer branding assets
-	// Place in images/:
-	//   logo.png   → replaces the Fedora logo in the installer sidebar
-	//   banner.png → replaces the blue sidebar background banner
-	if hasDir(b.paths.ImagesDir) {
+	// images/ — Anaconda installer branding
+	// logo.png   → /usr/share/anaconda/pixmaps/sidebar-logo.png  (500×500 px)
+	// banner.png → /usr/share/anaconda/pixmaps/sidebar-bg.png    (169×600 px)
+	if b.paths != nil && hasDir(b.paths.ImagesDir) {
 		comment("── Anaconda installer branding (images/) ──────────────────────────")
-		comment("  logo.png   → /usr/share/anaconda/pixmaps/sidebar-logo.png")
-		comment("  banner.png → /usr/share/anaconda/pixmaps/sidebar-bg.png")
-		// Copy into the image; Anaconda picks them up from these paths.
-		// Both png files are optional — only copy what exists.
 		line("COPY images/ /tmp/los-images/")
 		line("RUN set -eux \\")
 		line("    && if [ -f /tmp/los-images/logo.png ]; then \\")
@@ -517,14 +512,10 @@ func (b *CloudBuilder) PodmanPush(tag string) error {
 	ui.Info("Pushing: %s", tag)
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
 	env := append(os.Environ(), "CONTAINERS_STORAGE_CONF="+storageCfg)
-	// --compression-format=gzip is required to preserve ostree layer annotations
-	// (ostree.final-diffid etc.) that BIB needs to deploy the image.
-	// zstd (podman default since Fedora 38) strips these annotations and causes
-	// "Missing ostree.final-diffid" errors during Anaconda installation.
-	return b.runEnv(env, "podman", "push",
-		"--compression-format=gzip",
-		tag,
-	)
+	// --compression-format=gzip preserves ostree layer annotations
+	// (ostree.final-diffid etc.) that BIB needs during ISO build.
+	// Podman's default zstd compression strips these annotations.
+	return b.runEnv(env, "podman", "push", "--compression-format=gzip", tag)
 }
 
 func (b *CloudBuilder) CosignSign(tag string) error {
