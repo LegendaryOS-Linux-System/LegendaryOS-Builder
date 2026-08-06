@@ -28,23 +28,6 @@ func generateKickstart(cfg *config.Config, paths *config.Paths) (string, error) 
 	comment("╚══════════════════════════════════════════════════════════════╝")
 	blank()
 
-	// ── %anaconda — product branding ──────────────────────────────────────
-	// This overrides "Fedora Linux 44" in GRUB menu and Anaconda UI header.
-	productName    := orDefault(cfg.Anaconda.ProductName, cfg.Project.Name)
-	productVersion := orDefault(cfg.Anaconda.ProductVersion, cfg.Project.Version)
-	if productName != "" {
-		line("%anaconda")
-		line("pwpolicy root --minlen=0 --minquality=1 --notstrict --nochanges --notempty")
-		line("pwpolicy user --minlen=0 --minquality=1 --notstrict --nochanges --emptyok")
-		line("pwpolicy luks --minlen=0 --minquality=1 --notstrict --nochanges --notempty")
-		line("%end")
-		blank()
-		// product name/version go into a separate directive understood by
-		// Anaconda's product-specific kickstart path.  BIB injects
-		// ostreecontainer automatically — we must NOT add it ourselves.
-		comment(fmt.Sprintf("Product: %s %s", productName, productVersion))
-	}
-
 	// ── Installation mode ─────────────────────────────────────────────────
 	if cfg.Anaconda.WebUI {
 		line("graphical")
