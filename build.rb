@@ -34,7 +34,7 @@ end
 # ── Version metadata (mirrors Makefile logic) ─────────────────────────────────
 
 def version
-  shell_capture("git describe --tags --always --dirty 2>/dev/null") || "v0.5.2"
+  shell_capture("git describe --tags --always --dirty 2>/dev/null") || "v0.4.0"
 end
 
 def commit
