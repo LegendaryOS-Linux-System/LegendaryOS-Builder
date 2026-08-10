@@ -156,14 +156,6 @@ func (b *ISOBuilder) buildViaBinary(sourceImage, outDir, finalPath, label, kicks
 		return fmt.Errorf("cannot pull source image %s: %w", sourceImage, err)
 	}
 
-	ociDir := filepath.Join(outDir, "oci-image")
-	_ = os.RemoveAll(ociDir)
-	ui.Info("Exporting image to OCI dir: %s", ociDir)
-	if err := b.run("podman", "save", "--format=oci-dir", "-o", ociDir, sourceImage); err != nil {
-		return fmt.Errorf("cannot export image to OCI dir: %w", err)
-	}
-	ociRef := "oci:" + ociDir
-
 	bibCfgPath, err := b.writeBIBConfig(outDir, label, kickstart)
 	if err != nil {
 		return err
@@ -178,14 +170,13 @@ func (b *ISOBuilder) buildViaBinary(sourceImage, outDir, finalPath, label, kicks
 	if bibCfgPath != "" {
 		args = append(args, "--config", bibCfgPath)
 	}
-	args = append(args, ociRef)
+	args = append(args, sourceImage)
 
 	ui.Info("bootc-image-builder %s", strings.Join(args, " "))
 	if err := b.run("bootc-image-builder", args...); err != nil {
 		return err
 	}
 
-	_ = os.RemoveAll(ociDir)
 	return b.renameOutput(outDir, finalPath)
 }
 
@@ -194,135 +185,13 @@ func (b *ISOBuilder) buildViaPodman(sourceImage, outDir, finalPath, label, kicks
 	ui.Info("Method: bootc-image-builder via podman (privileged container)")
 	ui.Info("BIB image: %s", bibImage)
 
-	// Root cause: GHCR recompresses layers server-side, changing the layer
-	// sha256. The ostree.final-diffid label stays pointing to the old sha256,
-	// so Anaconda fails with "Missing ostree.final-diffid".
-	//
-	// Fix: export to OCI dir, patch the config blob JSON directly to update
-	// ostree.final-diffid to match the actual layer DiffID, then re-import.
-	// This preserves the full ostree/bootc structure unlike buildah commit.
-
-	ui.Info("Pulling source image: %s", sourceImage)
+	// Pre-pull into local containers-storage — BIB requires the image to
+	// already be present locally (it no longer pulls images itself).
+	// With --squash-all during podman build the image has exactly 1 layer,
+	// so ostree.final-diffid matches the DiffID correctly after pull.
+	ui.Info("Pre-pulling source image: %s", sourceImage)
 	if err := b.run("podman", "pull", "--platform=linux/amd64", sourceImage); err != nil {
 		return fmt.Errorf("cannot pull source image %s: %w", sourceImage, err)
-	}
-
-	// Export to OCI dir
-	ociDir := filepath.Join(outDir, "oci-image")
-	_ = os.RemoveAll(ociDir)
-	ui.Info("Exporting to OCI dir: %s", ociDir)
-	if err := b.run("podman", "save", "--format=oci-dir", "-o", ociDir, sourceImage); err != nil {
-		return fmt.Errorf("cannot export image to OCI dir: %w", err)
-	}
-
-	// Patch ostree.final-diffid in the OCI config blob to match actual layer
-	ui.Info("Patching ostree.final-diffid in OCI config blob")
-	patchScript := `
-import json, os, sys, hashlib, gzip
-
-oci_dir = sys.argv[1]
-
-# Read index to find manifest
-with open(os.path.join(oci_dir, 'index.json')) as f:
-    index = json.load(f)
-
-manifest_digest = index['manifests'][0]['digest'].replace('sha256:', '')
-manifest_path = os.path.join(oci_dir, 'blobs', 'sha256', manifest_digest)
-
-with open(manifest_path) as f:
-    manifest = json.load(f)
-
-# Get config blob
-config_digest = manifest['config']['digest'].replace('sha256:', '')
-config_path = os.path.join(oci_dir, 'blobs', 'sha256', config_digest)
-
-with open(config_path) as f:
-    config = json.load(f)
-
-# Get the actual uncompressed layer DiffID from config
-actual_diffid = config['rootfs']['diff_ids'][0]
-print(f'Actual DiffID from config: {actual_diffid}')
-
-# Get current ostree.final-diffid from labels
-labels = config.get('config', {}).get('Labels', {})
-current_diffid = labels.get('ostree.final-diffid', '')
-print(f'Current ostree.final-diffid: {current_diffid}')
-
-if actual_diffid == current_diffid:
-    print('DiffIDs match — no patch needed')
-    sys.exit(0)
-
-# Patch the label
-print(f'Patching: {current_diffid} -> {actual_diffid}')
-config['config']['Labels']['ostree.final-diffid'] = actual_diffid
-
-# Write patched config blob
-new_config = json.dumps(config, separators=(',', ':')).encode()
-new_config_digest = hashlib.sha256(new_config).hexdigest()
-new_config_path = os.path.join(oci_dir, 'blobs', 'sha256', new_config_digest)
-
-with open(new_config_path, 'wb') as f:
-    f.write(new_config)
-
-# Update manifest to point to new config blob
-manifest['config']['digest'] = 'sha256:' + new_config_digest
-manifest['config']['size'] = len(new_config)
-
-new_manifest = json.dumps(manifest, separators=(',', ':')).encode()
-new_manifest_digest = hashlib.sha256(new_manifest).hexdigest()
-new_manifest_path = os.path.join(oci_dir, 'blobs', 'sha256', new_manifest_digest)
-
-with open(new_manifest_path, 'wb') as f:
-    f.write(new_manifest)
-
-# Update index to point to new manifest
-index['manifests'][0]['digest'] = 'sha256:' + new_manifest_digest
-index['manifests'][0]['size'] = len(new_manifest)
-
-with open(os.path.join(oci_dir, 'index.json'), 'w') as f:
-    json.dump(index, f, separators=(',', ':'))
-
-print('Patch applied successfully')
-`
-	patchOut, err := b.runOutput("python3", "-c", patchScript, ociDir)
-	if err != nil {
-		ui.Info("Warning: OCI patch failed (%v), proceeding anyway", err)
-	} else {
-		ui.Info("Patch result: %s", strings.TrimSpace(patchOut))
-	}
-
-	// Re-import patched OCI dir into containers-storage under original tag.
-	// Use skopeo copy oci:dir -> containers-storage:tag which is unambiguous.
-	// If skopeo is unavailable fall back to podman pull oci:dir + tag by digest.
-	ui.Info("Re-importing patched image as: %s", sourceImage)
-	_ = b.run("podman", "rmi", "-f", sourceImage)
-
-	skopeoErr := b.run("skopeo", "copy",
-		"oci:"+ociDir,
-		"containers-storage:"+sourceImage,
-	)
-	if skopeoErr != nil {
-		ui.Info("skopeo not available (%v), using podman pull + tag", skopeoErr)
-
-		// podman pull from oci-dir, capture the image ID from output
-		loadOut, err := b.runOutput("podman", "pull", "oci:"+ociDir)
-		if err != nil {
-			return fmt.Errorf("cannot re-import patched OCI dir: %w", err)
-		}
-		// loadOut last non-empty line is the image ID / digest
-		imageID := ""
-		for _, line := range strings.Split(strings.TrimSpace(loadOut), "\n") {
-			if t := strings.TrimSpace(line); t != "" {
-				imageID = t
-			}
-		}
-		if imageID == "" {
-			return fmt.Errorf("cannot determine loaded image ID after podman pull oci:")
-		}
-		ui.Info("Loaded image ID: %s", imageID)
-		if err := b.run("podman", "tag", imageID, sourceImage); err != nil {
-			return fmt.Errorf("cannot tag patched image as %s: %w", sourceImage, err)
-		}
 	}
 
 	bibCfgPath, err := b.writeBIBConfig(outDir, label, kickstart)
@@ -363,7 +232,6 @@ print('Patch applied successfully')
 			sourceImage)
 	}
 
-	_ = os.RemoveAll(ociDir)
 	return b.renameOutput(outDir, finalPath)
 }
 
@@ -464,17 +332,6 @@ func (b *ISOBuilder) run(name string, args ...string) error {
 	}
 	ui.OK("%s done", name)
 	return nil
-}
-
-func (b *ISOBuilder) runOutput(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.Env = os.Environ()
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", name, err)
-	}
-	return string(out), nil
 }
 
 func (b *ISOBuilder) rootfs() string {
