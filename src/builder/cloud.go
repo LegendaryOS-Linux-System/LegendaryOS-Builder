@@ -321,23 +321,6 @@ func (b *CloudBuilder) renderContainerfileBody(install, remove []string, platfor
 		blank()
 	}
 
-	// images/ — Anaconda installer branding
-	// logo.png   → /usr/share/anaconda/pixmaps/sidebar-logo.png  (500×500 px)
-	// banner.png → /usr/share/anaconda/pixmaps/sidebar-bg.png    (169×600 px)
-	if b.paths != nil && hasDir(b.paths.ImagesDir) {
-		comment("── Anaconda installer branding (images/) ──────────────────────────")
-		line("COPY images/ /tmp/los-images/")
-		line("RUN set -eux \\")
-		line("    && if [ -f /tmp/los-images/logo.png ]; then \\")
-		line("         install -Dm644 /tmp/los-images/logo.png /usr/share/anaconda/pixmaps/sidebar-logo.png; \\")
-		line("       fi \\")
-		line("    && if [ -f /tmp/los-images/banner.png ]; then \\")
-		line("         install -Dm644 /tmp/los-images/banner.png /usr/share/anaconda/pixmaps/sidebar-bg.png; \\")
-		line("       fi \\")
-		line("    && rm -rf /tmp/los-images")
-		blank()
-	}
-
 	// NOTE: Flatpak packages are intentionally omitted here.
 	// They are handled by the Anaconda kickstart at system install time.
 	comment("── NOTE: Flatpak packages are applied at install time via Anaconda ──")
@@ -491,7 +474,13 @@ func (b *CloudBuilder) PodmanBuild(tag string, noCache bool) error {
 	if noCache {
 		args = append(args, "--no-cache")
 	}
-	if b.release {
+	// --squash-all is required for bootc/ostree images:
+	// ostree container commit records the uncompressed sha256 of the final
+	// layer as ostree.final-diffid.  Without squashing, the image has many
+	// layers and GHCR recompresses them, making ostree.final-diffid point to
+	// a layer that no longer exists → "Missing ostree.final-diffid" at install.
+	// With squash-all the image has exactly 1 layer whose hash matches.
+	if b.cfg.Project.IsImmutable() || b.release {
 		args = append(args, "--squash-all")
 	}
 	args = append(args, b.paths.Root)
@@ -512,10 +501,7 @@ func (b *CloudBuilder) PodmanPush(tag string) error {
 	ui.Info("Pushing: %s", tag)
 	storageCfg := filepath.Join(b.paths.BuildDir, "storage.conf")
 	env := append(os.Environ(), "CONTAINERS_STORAGE_CONF="+storageCfg)
-	// --compression-format=gzip preserves ostree layer annotations
-	// (ostree.final-diffid etc.) that BIB needs during ISO build.
-	// Podman's default zstd compression strips these annotations.
-	return b.runEnv(env, "podman", "push", "--compression-format=gzip", tag)
+	return b.runEnv(env, "podman", "push", tag)
 }
 
 func (b *CloudBuilder) CosignSign(tag string) error {
