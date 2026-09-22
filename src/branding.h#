@@ -1,0 +1,46 @@
+use "std -> fs"   from "fs"
+use "std -> path" from "path"
+
+fn overlay_root(staging: string) -> string is
+    return path::join(staging, "includes.chroot_after_packages")
+end
+
+fn copy_into(staging: string, rel_dir: string, src: string, dst_name: string) is
+    let dest_dir = path::join(overlay_root(staging), rel_dir)
+    fs::mkdir(dest_dir)
+    fs::copy(src, path::join(dest_dir, dst_name))
+end
+
+;; `branding_dir` to ścieżka do branding/ w projekcie, `staging` to
+;; katalog roboczy, w którym livebuild.h# składa całą nakładkę przed
+;; wywołaniem `lb config`.
+pub fn stage(branding_dir: string, staging: string) is
+    let logo        = path::join(branding_dir, "logo.png")
+    let logo_bg_png = path::join(branding_dir, "logo-bg.png")
+    let logo_bg_jpg = path::join(branding_dir, "logo-bg.jpg")
+    let notext      = path::join(branding_dir, "notext-bg.png")
+    let banner      = path::join(branding_dir, "banner.png")
+
+    ;; Calamares -- panel boczny instalatora (logo z tłem) + baner na
+    ;; ekranie powitalnym.
+    copy_into(staging, "etc/calamares/branding/legendaryos", logo_bg_png, "logo.png")
+    copy_into(staging, "etc/calamares/branding/legendaryos", banner, "show.png")
+
+    ;; Plymouth (splash startowy) -- wersja bez tła/tekstu, żeby dobrze
+    ;; wyglądała na dowolnym kolorze ekranu ładowania.
+    copy_into(staging, "usr/share/plymouth/themes/legendaryos", notext, "watermark.png")
+
+    ;; GRUB -- .jpg, bo grub2 na wielu ustawieniach ma problem z
+    ;; przezroczystością PNG w tle menu.
+    copy_into(staging, "usr/share/legendaryos/grub", logo_bg_jpg, "background.jpg")
+
+    ;; Kopia "surowa" dla wszystkiego innego (motd, strona logowania,
+    ;; hdm itp.), żeby helpery mogły po prostu po nią sięgnąć.
+    copy_into(staging, "usr/share/legendaryos/branding", logo, "logo.png")
+    copy_into(staging, "usr/share/legendaryos/branding", banner, "banner.png")
+    copy_into(staging, "usr/share/legendaryos/branding", notext, "notext-bg.png")
+    copy_into(staging, "usr/share/legendaryos/branding", logo_bg_png, "logo-bg.png")
+    copy_into(staging, "usr/share/legendaryos/branding", logo_bg_jpg, "logo-bg.jpg")
+
+    write("  \x1b[32m✔\x1b[0m branding wpięty w nakładkę live-build")
+end
