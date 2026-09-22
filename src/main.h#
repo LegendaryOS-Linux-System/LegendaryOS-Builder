@@ -1,1 +1,16 @@
+mod version
+mod hkconf
+mod project
+mod branding
+mod scriptrunner
+mod livebuild
+mod gitsync
+mod scaffold
+mod cli
 
+use "std -> env" from "env"
+
+fn main() is
+    let argv: [string] = env::args()
+    cli::dispatch(argv)
+end
