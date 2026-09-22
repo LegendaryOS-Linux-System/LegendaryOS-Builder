@@ -1,0 +1,20 @@
+pub fn name() -> string is return "LegendaryOS-Builder" end
+pub fn version() -> string is return "v0.6" end
+
+;; Organizacja/repo, z którego LegendaryOS dziedziczy bazowy system
+;; (patrz README.adoc, sekcja "Relacja z HackerOS").
+pub fn upstream_org() -> string is return "HackerOS-Linux-System" end
+pub fn upstream_repo() -> string is return "HackerOS" end
+pub fn upstream_url() -> string is
+    return "https://github.com/HackerOS-Linux-System/HackerOS.git"
+end
+
+pub fn banner() -> string is
+    let mut out: string = ""
+    out = out + "\n"
+    out = out + "  \x1b[35m╔══════════════════════════════════════════╗\x1b[0m\n"
+    out = out + "  \x1b[35m║\x1b[0m   \x1b[1mLegendaryOS-Builder\x1b[0m  " + version() + "               \x1b[35m║\x1b[0m\n"
+    out = out + "  \x1b[35m║\x1b[0m   nakładka na live-build dla LegendaryOS  \x1b[35m║\x1b[0m\n"
+    out = out + "  \x1b[35m╚══════════════════════════════════════════╝\x1b[0m\n"
+    return out
+end
