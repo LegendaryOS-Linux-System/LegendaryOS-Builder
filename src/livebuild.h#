@@ -1,0 +1,115 @@
+mod hkconf
+mod project
+mod branding
+
+use "std -> fs"      from "fs"
+use "std -> path"    from "path"
+use "std -> process" from "proc"
+
+fn staging_dir(root: string) -> string is
+    return path::join(root, "build/.staging")
+end
+
+fn config_dir(root: string) -> string is
+    return path::join(root, "build/config")
+end
+
+;; files/ w projekcie to nakładka "after packages" -- kopiowana 1:1 pod
+;; includes.chroot_after_packages/, na tych samych zasadach co
+;; branding.h#'s `stage`.
+fn stage_files_tree(files_dir: string, staging: string) is
+    if !fs::is_dir(files_dir) is return end
+    let dest = path::join(staging, "includes.chroot_after_packages")
+    fs::mkdir(dest)
+    let entries = fs::walk(files_dir)
+    let mut i = 0
+    while i < entries.len() is
+        if fs::is_file(entries[i]) is
+            let rel = entries[i][files_dir.len() + 1..entries[i].len()]
+            let dst = path::join(dest, rel)
+            fs::mkdir(path::parent(dst))
+            fs::copy(entries[i], dst)
+        end
+        i += 1
+    end
+end
+
+;; Minimalna lista pakietów -- config.hk może (opcjonalnie) wymieniać
+;; dodatkowe pakiety w sekcji [packages], klucz po kluczu, wartość
+;; ignorowana (klucz = nazwa pakietu). To celowo prosty, jednopoziomowy
+;; format -- coś rozbudowanego (zależności, warunki per-edycja) należy
+;; już do package-lists/*.list.chroot ręcznie utrzymywanych w projekcie,
+;; tak jak w HackerOS-main/helpers/*/package-lists/.
+fn write_package_list(hk: hkconf::HkFile, config_root: string) is
+    let names = ["calamares", "calamares-settings-debian", "plymouth", "grub-pc", "grub-efi-amd64"]
+    let mut out = "# wygenerowane przez legendaryos-builder z config.hk [project]\n"
+    let mut i = 0
+    while i < names.len() is
+        out = out + names[i] + "\n"
+        i += 1
+    end
+    let dest = path::join(config_root, "package-lists")
+    fs::mkdir(dest)
+    fs::write(path::join(dest, "legendaryos-base.list.chroot"), out)
+end
+
+;; Etap 1: przygotuj katalog config/ (branding + files + package-lists),
+;; zgodny z layoutem, którego oczekuje `lb config`/`lb build`.
+pub fn stage(p: project::Project) -> bool is
+    let staging = staging_dir(p.root)
+    if fs::exists(staging) is fs::rmdir_all(staging) end
+    fs::mkdir(staging)
+
+    branding::stage(path::join(p.root, "branding"), staging)
+    stage_files_tree(path::join(p.root, "files"), staging)
+    write_package_list(p.config, staging)
+
+    write("  \x1b[32m✔\x1b[0m nakładka live-build przygotowana w " + staging)
+    return true
+end
+
+;; Etap 2: `lb config` -- ustawia dystrybucję bazową (Debian suite z
+;; [release] -> suite w config.hk), architekturę i miejsce, z którego
+;; live-build ma wziąć naszą nakładkę.
+pub fn lb_config(p: project::Project) -> bool is
+    if proc::which("lb") == "" is
+        write("  \x1b[31m✘\x1b[0m nie znaleziono `lb` (live-build) w PATH -- " +
+              "zainstaluj pakiet `live-build`")
+        return false
+    end
+
+    let suite = hkconf::get_or(p.config, "release", "suite", "trixie")
+    let arch  = hkconf::get_or(p.config, "project", "arch", "amd64")
+    let cfg   = config_dir(p.root)
+    fs::mkdir(cfg)
+
+    let args = [
+        "config",
+        "--distribution", suite,
+        "--architectures", arch,
+        "--binary-images", "iso-hybrid",
+    ]
+    proc::run_args("lb", args)
+    fs::rmdir_all(path::join(cfg, "includes.chroot_after_packages"))
+    fs::copy(
+        path::join(staging_dir(p.root), "includes.chroot_after_packages"),
+        path::join(cfg, "includes.chroot_after_packages"),
+    )
+    fs::copy(
+        path::join(staging_dir(p.root), "package-lists"),
+        path::join(cfg, "package-lists"),
+    )
+    return true
+end
+
+;; Etap 3: `lb build` -- ISO trafia do build/<nazwa>.iso.
+pub fn lb_build(p: project::Project) -> bool is
+    if proc::which("lb") == "" is return false end
+    write("  → lb build (to może potrwać długo)...")
+    proc::run("cd " + config_dir(p.root) + " && lb build")
+
+    let iso_name = hkconf::get_or(p.config, "build", "iso-name",
+                                   hkconf::get_or(p.config, "project", "name", "legendaryos"))
+    write("  \x1b[32m✔\x1b[0m build zakończony -- szukaj " + iso_name + "*.iso w " + config_dir(p.root))
+    return true
+end
