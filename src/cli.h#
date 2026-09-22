@@ -1,0 +1,164 @@
+mod version
+mod project
+mod scaffold
+mod livebuild
+mod scriptrunner
+mod gitsync
+
+use "std -> env" from "env"
+
+fn dir_or_default(argv: [string], idx: int) -> string is
+    if idx < argv.len() is return argv[idx] end
+    return "."
+end
+
+;; Nie używamy tu typu opcjonalnego -- `LoadResult.ok` mówi wprost, czy
+;; `project` w ogóle nadaje się do dalszego użycia, bez polegania na
+;; dopasowywaniu `nil` po stronie wołającego.
+struct LoadResult is
+    ok:      bool
+    project: project::Project
+end
+
+fn load_and_check(root: string) -> LoadResult is
+    let p = project::load(root)
+    let v = project::validate(p)
+    project::print_report(v)
+    return LoadResult { ok: project::is_ok(v), project: p }
+end
+
+pub fn print_help() is
+    write(version::banner())
+    write("Użycie: legendaryos-builder <komenda> [argumenty]")
+    write("")
+    write("  new <nazwa>          utwórz szkielet nowego projektu LegendaryOS")
+    write("  validate [ścieżka]   zwaliduj strukturę projektu (domyślnie: .)")
+    write("  build [ścieżka]      pełny build: stage + skrypty + lb config + lb build")
+    write("  clean [ścieżka]      usuń build/ w projekcie")
+    write("  sync-base [--ref R]  zsynchronizuj lokalną bazę HackerOS przez hgit")
+    write("")
+    write("  stage [ścieżka]        (etap) przygotuj nakładkę live-build")
+    write("  run-scripts [ścieżka]  (etap) uruchom scripts/*.hl")
+    write("  lb-config [ścieżka]    (etap) lb config")
+    write("  lb-build [ścieżka]     (etap) lb build")
+    write("")
+    write("  --version, -V        pokaż wersję")
+    write("  --help, -h           ta pomoc")
+end
+
+fn cmd_new(argv: [string]) is
+    if argv.len() < 3 is
+        write("Użycie: legendaryos-builder new <nazwa>")
+        return
+    end
+    scaffold::create(argv[2])
+end
+
+fn cmd_validate(argv: [string]) is
+    let root = dir_or_default(argv, 2)
+    let p = project::load(root)
+    let v = project::validate(p)
+    project::print_report(v)
+    if !project::is_ok(v) is
+        write("")
+        write("Build przerwany -- napraw powyższe błędy i spróbuj ponownie.")
+    end
+end
+
+fn cmd_stage(argv: [string]) -> bool is
+    let root = dir_or_default(argv, 2)
+    let loaded = load_and_check(root)
+    if !loaded.ok is return false end
+    return livebuild::stage(loaded.project)
+end
+
+fn cmd_run_scripts(argv: [string]) -> bool is
+    let root = dir_or_default(argv, 2)
+    let results = scriptrunner::run_all(root + "/scripts")
+    return scriptrunner::all_ok(results)
+end
+
+fn cmd_lb_config(argv: [string]) -> bool is
+    let root = dir_or_default(argv, 2)
+    let loaded = load_and_check(root)
+    if !loaded.ok is return false end
+    return livebuild::lb_config(loaded.project)
+end
+
+fn cmd_lb_build(argv: [string]) -> bool is
+    let root = dir_or_default(argv, 2)
+    let loaded = load_and_check(root)
+    if !loaded.ok is return false end
+    return livebuild::lb_build(loaded.project)
+end
+
+fn cmd_build(argv: [string]) is
+    let root = dir_or_default(argv, 2)
+    write(version::banner())
+
+    let loaded = load_and_check(root)
+    if !loaded.ok is
+        write("")
+        write("Build przerwany -- struktura projektu jest niepoprawna.")
+        return
+    end
+
+    let p = loaded.project
+    if !livebuild::stage(p) is return end
+
+    let results = scriptrunner::run_all(root + "/scripts")
+    if !scriptrunner::all_ok(results) is
+        write("Build przerwany -- skrypt scripts/*.hl zwrócił błąd.")
+        return
+    end
+
+    if !livebuild::lb_config(p) is return end
+    livebuild::lb_build(p)
+end
+
+fn cmd_clean(argv: [string]) is
+    let root = dir_or_default(argv, 2)
+    write("  → usuwam " + root + "/build")
+    __builtin_fs_rmdir_all(root + "/build")
+end
+
+fn cmd_sync_base(argv: [string]) is
+    let mut ref_name = "official"
+    let mut i = 2
+    while i < argv.len() is
+        if argv[i] == "--ref" && i + 1 < argv.len() is
+            ref_name = argv[i + 1]
+        end
+        i += 1
+    end
+    gitsync::bootstrap_mirror(version::upstream_url(), ref_name)
+end
+
+pub fn dispatch(argv: [string]) is
+    if argv.len() < 2 is
+        print_help()
+        return
+    end
+
+    let cmd = argv[1]
+
+    if cmd == "--help" || cmd == "-h" is print_help() return end
+    if cmd == "--version" || cmd == "-V" is
+        write(version::name() + " " + version::version())
+        return
+    end
+
+    if cmd == "new" is cmd_new(argv) return end
+    if cmd == "validate" is cmd_validate(argv) return end
+    if cmd == "build" is cmd_build(argv) return end
+    if cmd == "clean" is cmd_clean(argv) return end
+    if cmd == "sync-base" is cmd_sync_base(argv) return end
+
+    if cmd == "stage" is cmd_stage(argv) return end
+    if cmd == "run-scripts" is cmd_run_scripts(argv) return end
+    if cmd == "lb-config" is cmd_lb_config(argv) return end
+    if cmd == "lb-build" is cmd_lb_build(argv) return end
+
+    write("Nieznana komenda: " + cmd)
+    print_help()
+end
