@@ -1,1 +1,52 @@
+#!/usr/bin/hl
+using <gen 2>
 
+%RELEASE: str = --release
+%BIN_NAME: str = legendaryos-builder
+%BUILD_OUT: str = build/legendaryos-builder
+%INSTALL_PATH: str = /usr/bin/legendaryos-builder
+
+~> ==> Sprawdzanie zależności (bytes, h#)...
+
+::which bytes
+? err
+    ~> BŁĄD: nie znaleziono `bytes` (H# Package Manager) w PATH.
+    ~> Zainstaluj go najpierw: https://github.com/HackerOS-Linux-System/bytes
+    > exit 1
+done
+
+::which h#
+? err
+    ~> BŁĄD: nie znaleziono `h#` (kompilator H#) w PATH.
+    ~> Zainstaluj go najpierw: https://github.com/HackerOS-Linux-System/H-Sharp
+    > exit 1
+done
+
+~> ==> Pobieranie zależności (bytes install)...
+> bytes install
+? err
+    ~> BŁĄD: `bytes install` nie powiodło się -- sprawdź [deps] w Bytes.hk.
+    > exit 1
+done
+
+~> ==> Budowanie @BIN_NAME (bytes build @RELEASE)...
+> bytes build @RELEASE
+? err
+    ~> BŁĄD: budowa nie powiodła się.
+    > exit 1
+done
+
+> test -f @BUILD_OUT
+? err
+    ~> BŁĄD: oczekiwano binarki pod @BUILD_OUT, ale jej nie ma.
+    > exit 1
+done
+
+~> ==> Instalacja do @INSTALL_PATH (wymaga sudo)...
+> sudo install -Dm755 @BUILD_OUT @INSTALL_PATH
+? err
+    ~> BŁĄD: instalacja nie powiodła się (brak uprawnień?).
+    > exit 1
+done
+
+~> ==> Gotowe! Uruchom: legendaryos-builder --help
