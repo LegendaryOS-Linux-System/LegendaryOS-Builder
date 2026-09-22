@@ -1,0 +1,83 @@
+use "bytes -> git"   from "git"
+use "std -> fs"      from "fs"
+use "std -> path"    from "path"
+use "std -> env"     from "env"
+use "std -> process" from "proc"
+
+pub fn cache_dir() -> string is
+    return path::join(env::home(), ".cache/legendaryos-builder")
+end
+
+pub fn mirror_dir() -> string is
+    return path::join(cache_dir(), "hackeros-base")
+end
+
+;; Krok 1/2 (jedyny, który NIE idzie przez hgit): sprowadź/uaktualnij
+;; lokalne lustro HackerOS przez systemowy `git`, bo to jedyny transport
+;; sieciowy, jaki mamy do dyspozycji.
+pub fn bootstrap_mirror(url: string, ref_name: string) -> bool is
+    fs::mkdir(cache_dir())
+    if proc::which("git") == "" is
+        write("  \x1b[31m✘\x1b[0m nie znaleziono systemowego `git` -- potrzebny " +
+              "tylko do jednorazowego pobrania (hgit nie ma transportu sieciowego)")
+        return false
+    end
+
+    if fs::is_dir(path::join(mirror_dir(), ".git")) is
+        write("  → aktualizuję lokalne lustro " + mirror_dir())
+        proc::run_args("git", ["-C", mirror_dir(), "fetch", "--all", "--tags"])
+        proc::run_args("git", ["-C", mirror_dir(), "checkout", ref_name])
+        proc::run_args("git", ["-C", mirror_dir(), "pull", "--ff-only"])
+    else is
+        write("  → klonuję " + url + " (gałąź " + ref_name + ") do " + mirror_dir())
+        proc::run_args("git", ["clone", "--branch", ref_name, "--single-branch", url, mirror_dir()])
+    end
+
+    return fs::is_dir(path::join(mirror_dir(), ".git"))
+end
+
+;; Krok 2/2 -- WYŁĄCZNIE hgit od tego miejsca w dół: zrób lokalną,
+;; wersjonowaną kopię roboczą lustra dla danego builda projektu (żeby
+;; jeden build nigdy nie mutował współdzielonego lustra pod stopami
+;; drugiego, równoległego builda).
+pub fn snapshot_base(dest_dir: string) -> bool is
+    if fs::exists(dest_dir) is
+        fs::rmdir_all(dest_dir)
+    end
+
+    let result = hgit::clone::clone(mirror_dir(), dest_dir)
+    match result is
+        hgit::error::GitResult::Err(e) => is
+            write("  \x1b[31m✘\x1b[0m hgit::clone nie powiódł się: " + e.to_string())
+            return false
+        end
+        hgit::error::GitResult::Ok(repo) => is
+            write("  \x1b[32m✔\x1b[0m lokalna kopia bazy HackerOS gotowa: " + repo.workdir())
+            return true
+        end
+    end
+end
+
+;; Krótki changelog bazy (przez hgit::porcelain::log) -- przydatny w
+;; release notes danego builda LegendaryOS ("zbudowano na bazie HackerOS
+;; @ <ostatnie N commitów>").
+pub fn base_log(dest_dir: string, limit: int) -> [string] is
+    let opened = hgit::repository::open(dest_dir)
+    match opened is
+        hgit::error::GitResult::Err(_) => is
+            return []
+        end
+        hgit::error::GitResult::Ok(repo) => is
+            let logged = hgit::porcelain::log(repo)
+            match logged is
+                hgit::error::GitResult::Err(_) => is
+                    return []
+                end
+                hgit::error::GitResult::Ok(lines) => is
+                    if lines.len() <= limit is return lines end
+                    return lines[0..limit]
+                end
+            end
+        end
+    end
+end
