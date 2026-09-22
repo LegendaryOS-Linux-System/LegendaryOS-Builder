@@ -1,0 +1,167 @@
+mod hkconf
+
+use "std -> fs"      from "fs"
+use "std -> path"    from "path"
+use "std -> strings" from "str"
+
+pub fn required_branding_files() -> [string] is
+    return ["banner.png", "logo-bg.jpg", "logo-bg.png", "logo.png", "notext-bg.png"]
+end
+
+pub struct Project is
+    pub root:      string
+    pub config:    hkconf::HkFile
+    pub user:      hkconf::HkFile
+end
+
+;; Wynik walidacji: lista błędów (pusta = OK) + lista ostrzeżeń
+;; (np. pusty token w user.hk -- nie blokuje, ale ostrzega, dokładnie
+;; tak jak build/build-hackeros-atomic robi to dla ATOMIC_TOKEN).
+pub struct ValidationResult is
+    pub errors:   [string]
+    pub warnings: [string]
+end
+
+pub fn is_ok(v: ValidationResult) -> bool is
+    return v.errors.len() == 0
+end
+
+fn add_error(v: ValidationResult, msg: string) -> ValidationResult is
+    let mut errs = v.errors
+    errs.push(msg)
+    return ValidationResult { errors: errs, warnings: v.warnings }
+end
+
+fn add_warning(v: ValidationResult, msg: string) -> ValidationResult is
+    let mut warns = v.warnings
+    warns.push(msg)
+    return ValidationResult { errors: v.errors, warnings: warns }
+end
+
+fn check_branding(root: string, v: ValidationResult) -> ValidationResult is
+    let dir = path::join(root, "branding")
+    let mut result = v
+    if !fs::is_dir(dir) is
+        return add_error(result, "brak katalogu branding/")
+    end
+    let required = required_branding_files()
+    let mut i = 0
+    while i < required.len() is
+        let p = path::join(dir, required[i])
+        if !fs::is_file(p) is
+            result = add_error(result, "brak pliku branding/" + required[i])
+        end
+        i += 1
+    end
+    return result
+end
+
+;; scripts/ może istnieć i być puste -- ale jeśli coś w nim jest, MUSI
+;; mieć rozszerzenie .hl. Zero tolerancji dla .sh/.bash/.py itd. -- to
+;; jest twarde wymaganie z założeń projektu ("tylko Hacker Lang, żadnego
+;; Shella").
+fn check_scripts(root: string, v: ValidationResult) -> ValidationResult is
+    let dir = path::join(root, "scripts")
+    let mut result = v
+    if !fs::is_dir(dir) is
+        return add_error(result, "brak katalogu scripts/")
+    end
+    let names = fs::list_dir(dir)
+    let mut i = 0
+    while i < names.len() is
+        let name = names[i]
+        let full = path::join(dir, name)
+        if fs::is_file(full) is
+            if path::extension(name) != "hl" is
+                result = add_error(result,
+                    "scripts/" + name + " -- niedozwolone rozszerzenie " +
+                    "(dozwolone jest WYŁĄCZNIE .hl, Hacker Lang; żadnego shella)")
+            end
+        end
+        i += 1
+    end
+    return result
+end
+
+fn check_files_dir(root: string, v: ValidationResult) -> ValidationResult is
+    let dir = path::join(root, "files")
+    if !fs::is_dir(dir) is
+        return add_error(v, "brak katalogu files/ (nakładka after-packages)")
+    end
+    return v
+end
+
+fn check_build_hl(root: string, v: ValidationResult) -> ValidationResult is
+    let p = path::join(root, "build.hl")
+    if !fs::is_file(p) is
+        return add_error(v, "brak build.hl (opis kroków budowy w Hacker Lang)")
+    end
+    return v
+end
+
+fn check_config_hk(root: string, hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result = v
+    if !hk.exists is
+        return add_error(result, "brak config.hk")
+    end
+    if hkconf::get(hk, "project", "name") == "" is
+        result = add_error(result, "config.hk: brak [project] -> name")
+    end
+    if hkconf::get(hk, "release", "base") == "" is
+        result = add_warning(result,
+            "config.hk: brak [release] -> base -- zakładam \"hackeros\" (domyślną bazę)")
+    end
+    return result
+end
+
+fn check_user_hk(root: string, hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result = v
+    if !hk.exists is
+        return add_error(result, "brak user.hk (organizacja + token)")
+    end
+    if hkconf::get(hk, "account", "name") == "" is
+        result = add_error(result, "user.hk: brak [account] -> name")
+    end
+    if hkconf::get(hk, "auth", "token") == "" is
+        result = add_warning(result,
+            "user.hk: [auth] -> token jest puste -- publikacja/pobieranie " +
+            "prywatnych zasobów organizacji może zostać odrzucone")
+    end
+    return result
+end
+
+;; Wczytaj projekt z `root` i zwaliduj CAŁĄ wymaganą strukturę na raz.
+;; Zawsze zwraca Project (nawet gdy walidacja się nie powiedzie) -- to
+;; walidacja (patrz `validate`) decyduje, czy wołający ma przerwać.
+pub fn load(root: string) -> Project is
+    let config = hkconf::load(path::join(root, "config.hk"))
+    let user   = hkconf::load(path::join(root, "user.hk"))
+    return Project { root: root, config: config, user: user }
+end
+
+pub fn validate(p: Project) -> ValidationResult is
+    let mut v = ValidationResult { errors: [], warnings: [] }
+    v = check_branding(p.root, v)
+    v = check_scripts(p.root, v)
+    v = check_files_dir(p.root, v)
+    v = check_build_hl(p.root, v)
+    v = check_config_hk(p.root, p.config, v)
+    v = check_user_hk(p.root, p.user, v)
+    return v
+end
+
+pub fn print_report(v: ValidationResult) is
+    let mut i = 0
+    while i < v.errors.len() is
+        write("  \x1b[31m✘\x1b[0m " + v.errors[i])
+        i += 1
+    end
+    i = 0
+    while i < v.warnings.len() is
+        write("  \x1b[33m!\x1b[0m " + v.warnings[i])
+        i += 1
+    end
+    if is_ok(v) is
+        write("  \x1b[32m✔\x1b[0m struktura projektu jest poprawna")
+    end
+end
