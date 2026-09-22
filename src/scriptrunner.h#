@@ -1,0 +1,86 @@
+use "std -> fs"      from "fs"
+use "std -> path"    from "path"
+use "std -> process" from "proc"
+use "std -> strings" from "str"
+
+pub struct ScriptResult is
+    pub name: string
+    pub ok:   bool
+    pub log:  string
+end
+
+fn sorted_hl_scripts(dir: string) -> [string] is
+    let mut names = fs::list_dir(dir)
+    ;; prosty insertion sort -- listy skryptów są małe (rzędu
+    ;; pojedynczych/kilkunastu plików), więc O(n^2) jest tu zupełnie
+    ;; wystarczające i nie wymaga sięgania po nic więcej niż porównanie
+    ;; stringów.
+    let mut i = 1
+    while i < names.len() is
+        let key = names[i]
+        let mut j = i - 1
+        while j >= 0 && names[j] > key is
+            names[j + 1] = names[j]
+            j -= 1
+        end
+        names[j + 1] = key
+        i += 1
+    end
+    let mut out: [string] = []
+    let mut k = 0
+    while k < names.len() is
+        if path::extension(names[k]) == "hl" is
+            out.push(names[k])
+        end
+        k += 1
+    end
+    return out
+end
+
+;; Uruchom wszystkie scripts/*.hl w `scripts_dir`, w kolejności
+;; alfabetycznej. Przerywa na pierwszym błędzie (tak jak `? err` w
+;; samym Hacker Lang przerywa dany skrypt) -- zwrócona lista zawiera
+;; wyniki wszystkiego, co zdążyło się uruchomić.
+pub fn run_all(scripts_dir: string) -> [ScriptResult] is
+    let mut results: [ScriptResult] = []
+
+    if proc::which("hl") == "" is
+        results.push(ScriptResult {
+            name: "(interpreter)",
+            ok: false,
+            log: "nie znaleziono `hl` (interpreter Hacker Lang) w PATH -- " +
+                 "zainstaluj HackerOS/Hacker Lang przed budową",
+        })
+        return results
+    end
+
+    let names = sorted_hl_scripts(scripts_dir)
+    let mut i = 0
+    while i < names.len() is
+        let full = path::join(scripts_dir, names[i])
+        write("  → scripts/" + names[i])
+        let output = proc::run_args("hl", [full])
+        ;; `hl` kończy proces kodem != 0 na pierwszym `? err` bez
+        ;; obsłużonej gałęzi -- run_args tego kodu nie eksponuje wprost,
+        ;; więc oceniamy powodzenie po tym, czy skrypt wypisał na
+        ;; wyjściu marker błędu (~> BŁĄD:), tak jak robią to wszystkie
+        ;; .hl w tym ekosystemie (patrz install.hl / build.hl).
+        let failed = str::index_of(output, "BŁĄD") >= 0 || str::index_of(output, "ERROR") >= 0
+        results.push(ScriptResult { name: names[i], ok: !failed, log: output })
+        if failed is
+            write("    \x1b[31m✘ nie powiodło się\x1b[0m")
+            return results
+        end
+        i += 1
+    end
+    return results
+end
+
+pub fn all_ok(results: [ScriptResult]) -> bool is
+    let mut i = 0
+    while i < results.len() is
+        if !results[i].ok is return false end
+        i += 1
+    end
+    return true
+end
