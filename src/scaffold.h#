@@ -1,0 +1,143 @@
+mod hkconf
+
+use "std -> fs"      from "fs"
+use "std -> path"    from "path"
+use "std -> base64"  from "b64"
+
+;; 1x1 px, kolor #6236B0 (fiolet LegendaryOS) -- realny, poprawny PNG,
+;; nie pusty plik. Wystarczy jako miejsce startowe; docelowy branding
+;; podmienia się plikami o właściwym rozmiarze (patrz README.adoc,
+;; sekcja "branding/").
+fn placeholder_png_b64() -> string is
+    return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNIMtvwHwAEjgJIbDiblwAAAABJRU5ErkJggg=="
+end
+
+;; 1x1 px, kolor #120C1E (tło LegendaryOS) jako JPEG -- dla logo-bg.jpg.
+fn placeholder_jpg_b64() -> string is
+    return "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5qooorpKP/9k="
+end
+
+fn write_placeholder(path_out: string, b64: string) is
+    fs::write_bytes(path_out, b64::decode_bytes(b64))
+end
+
+fn tpl_config_hk(name: string) -> string is
+    return "[project]\n" +
+           "-> name    => " + name + "\n" +
+           "-> tag     => stable\n" +
+           "-> arch    => amd64\n" +
+           "\n" +
+           "[release]\n" +
+           "-> base    => hackeros\n" +
+           "-> base-ref => official\n" +
+           "-> suite   => trixie\n" +
+           "\n" +
+           "[branding]\n" +
+           "-> distro-name => " + name + "\n" +
+           "-> theme       => legendary-gold\n" +
+           "\n" +
+           "[build]\n" +
+           "-> mode     => live-build\n" +
+           "-> iso-name => " + name + "\n"
+end
+
+;; Rozdzielone od config.hk celowo -- to plik z sekretem (token), łatwiej
+;; go trzymać poza kontrolą wersji (.gitignore) niż gdyby był wymieszany
+;; z resztą metadanych projektu w config.hk. Ten sam powód, dla którego
+;; HackerOS-Builder wstrzykuje [auth] -> token do config.hk z env CI
+;; zamiast trzymać go w repo na stałe -- tu po prostu poszliśmy o krok
+;; dalej i token od razu ma swój własny plik.
+fn tpl_user_hk() -> string is
+    return "[account]\n" +
+           "-> type => organisation\n" +
+           "-> name => \n" +
+           "\n" +
+           "[auth]\n" +
+           "-> token => \n"
+end
+
+fn tpl_build_hl(name: string) -> string is
+    return "#!/usr/bin/hl\n" +
+           "/// build.hl -- opis kroków budowy " + name + " (Hacker Lang)\n" +
+           "using <gen 2>\n" +
+           "\n" +
+           "%ISO_NAME: str = " + name + "\n" +
+           "\n" +
+           "~> ==> " + name + " -- start budowy\n" +
+           "\n" +
+           "> legendaryos-builder stage .\n" +
+           "? err\n" +
+           "    ~> BŁĄD: przygotowanie nakładki live-build nie powiodło się.\n" +
+           "    > exit 1\n" +
+           "done\n" +
+           "\n" +
+           "> legendaryos-builder run-scripts .\n" +
+           "? err\n" +
+           "    ~> BŁĄD: jeden ze skryptów scripts/*.hl zwrócił błąd.\n" +
+           "    > exit 1\n" +
+           "done\n" +
+           "\n" +
+           "> legendaryos-builder lb-config .\n" +
+           "? err\n" +
+           "    ~> BŁĄD: lb config nie powiodło się.\n" +
+           "    > exit 1\n" +
+           "done\n" +
+           "\n" +
+           "> legendaryos-builder lb-build .\n" +
+           "? err\n" +
+           "    ~> BŁĄD: lb build nie powiodło się.\n" +
+           "    > exit 1\n" +
+           "done\n" +
+           "\n" +
+           "~> ==> Gotowe! Szukaj @ISO_NAME*.iso w build/config/\n"
+end
+
+fn tpl_example_script(name: string) -> string is
+    return "#!/usr/bin/hl\n" +
+           "/// 10-motd.hl -- przykładowy hook after-packages dla " + name + "\n" +
+           "using <gen 2>\n" +
+           "\n" +
+           "~> ==> Ustawianie komunikatu dnia " + name + "...\n" +
+           "> mkdir -p files/etc\n" +
+           "? err\n" +
+           "    ~> BŁĄD: nie udało się przygotować files/etc\n" +
+           "    > exit 1\n" +
+           "done\n" +
+           "\n" +
+           "~> ==> Gotowe.\n"
+end
+
+pub fn create(name: string) -> bool is
+    if fs::exists(name) is
+        write("  \x1b[31m✘\x1b[0m katalog '" + name + "' już istnieje")
+        return false
+    end
+
+    fs::mkdir(name)
+    fs::mkdir(path::join(name, "branding"))
+    fs::mkdir(path::join(name, "scripts"))
+    fs::mkdir(path::join(name, "files"))
+
+    let branding = path::join(name, "branding")
+    write_placeholder(path::join(branding, "logo.png"), placeholder_png_b64())
+    write_placeholder(path::join(branding, "logo-bg.png"), placeholder_png_b64())
+    write_placeholder(path::join(branding, "notext-bg.png"), placeholder_png_b64())
+    write_placeholder(path::join(branding, "banner.png"), placeholder_png_b64())
+    write_placeholder(path::join(branding, "logo-bg.jpg"), placeholder_jpg_b64())
+
+    fs::write(path::join(name, "scripts/10-motd.hl"), tpl_example_script(name))
+    fs::write(path::join(name, "files/.gitkeep"), "")
+    fs::write(path::join(name, "build.hl"), tpl_build_hl(name))
+    fs::write(path::join(name, "config.hk"), tpl_config_hk(name))
+    fs::write(path::join(name, "user.hk"), tpl_user_hk())
+    fs::write(path::join(name, ".gitignore"), "user.hk\nbuild/\n")
+
+    write("  \x1b[32m✔\x1b[0m utworzono projekt '" + name + "'")
+    write("")
+    write("  Dalej:")
+    write("    1. Podmień pliki w " + name + "/branding/ na docelową grafikę")
+    write("    2. Uzupełnij " + name + "/user.hk (organizacja + token)")
+    write("    3. legendaryos-builder validate " + name)
+    write("    4. legendaryos-builder build " + name)
+    return true
+end
