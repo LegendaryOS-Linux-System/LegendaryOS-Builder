@@ -1,0 +1,99 @@
+use "std -> fs"          from "fs"
+use "std -> strings"     from "str"
+use "std -> collections" from "col"
+
+pub struct HkFile is
+    pub path:   string
+    pub values: any   ;; hashmap "sekcja.klucz" -> "wartość"
+    pub exists: bool
+end
+
+struct KV is
+    key: string
+    val: string
+end
+
+fn strip_comment(line: string) -> string is
+    let semi = str::index_of(line, ";;")
+    if semi >= 0 is return str::trim(line[0..semi]) end
+    return line
+end
+
+fn unquote(s: string) -> string is
+    let t = str::trim(s)
+    if t.len() >= 2 && t.starts_with("\"") && t.ends_with("\"") is
+        return t[1..t.len() - 1]
+    end
+    return t
+end
+
+fn parse_kv(line: string) -> KV is
+    ;; usuń wiodące "->"
+    let mut body = str::trim(line)
+    if body.starts_with("->") is
+        body = str::trim(body[2..body.len()])
+    end
+    let arrow = str::index_of(body, "=>")
+    if arrow < 0 is
+        return KV { key: unquote(body), val: "" }
+    end
+    let key = unquote(str::trim(body[0..arrow]))
+    let val = unquote(str::trim(body[arrow + 2..body.len()]))
+    return KV { key: key, val: val }
+end
+
+;; Wczytaj plik .hk. Brak pliku NIE jest błędem krytycznym -- zwracany
+;; jest pusty HkFile z `exists: false`, tak żeby wołający sam
+;; zdecydował, czy brak np. user.hk jest fatalny (patrz project.h#).
+pub fn load(path: string) -> HkFile is
+    let mut values = col::hashmap_new()
+    if !fs::exists(path) is
+        return HkFile { path: path, values: values, exists: false }
+    end
+
+    let lines: [string] = fs::read_lines(path)
+    let mut section: string = ""
+    let mut i: int = 0
+    while i < lines.len() is
+        let raw = lines[i]
+        i += 1
+        let line = strip_comment(str::trim(raw))
+        if line == "" is continue end
+        if line.starts_with("#") is continue end
+
+        if line.starts_with("[") && line.ends_with("]") is
+            section = str::trim(line[1..line.len() - 1])
+            continue
+        end
+
+        if !line.starts_with("->") is continue end
+
+        let kv = parse_kv(line)
+        if kv.key == "" is continue end
+        let full_key = section + "." + kv.key
+        values = col::hashmap_insert(values, full_key, kv.val)
+    end
+
+    return HkFile { path: path, values: values, exists: true }
+end
+
+pub fn get(hk: HkFile, section: string, key: string) -> string is
+    let v = col::hashmap_get(hk.values, section + "." + key)
+    if v == nil is return "" end
+    return v
+end
+
+pub fn get_or(hk: HkFile, section: string, key: string, default: string) -> string is
+    let v = get(hk, section, key)
+    if v == "" is return default end
+    return v
+end
+
+pub fn has(hk: HkFile, section: string, key: string) -> bool is
+    return col::hashmap_contains(hk.values, section + "." + key)
+end
+
+pub fn get_bool(hk: HkFile, section: string, key: string) -> bool is
+    let v = str::to_lower(get(hk, section, key))
+    return v == "true" || v == "1" || v == "yes"
+end
