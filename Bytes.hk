@@ -1,20 +1,15 @@
-package main
+[package]
+-> name        => legendaryos-builder
+-> version     => 0.6
+-> description => Narzędzie do budowy dystrybucji LegendaryOS (bazującej na HackerOS) — nakładka na live-build
+-> author      => LegendaryOS Team
+-> license     => MIT
 
-import (
-	"github.com/legendaryos/builder/src/cli"
-)
+[build]
+-> lang     => h#
+-> entry    => src/main.h#
+-> output   => build/legendaryos-builder
+-> include  => src/
 
-// Version information — set by -ldflags at build time.
-// To release v0.6: git tag v0.6 && git push origin v0.6
-var (
-	Version   = "v0.6"
-	Commit    = "unknown"
-	BuildDate = "unknown"
-)
-
-func main() {
-	cli.Version   = Version
-	cli.Commit    = Commit
-	cli.BuildDate = BuildDate
-	cli.Execute()
-}
+[deps]
+-> git => newest
