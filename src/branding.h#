@@ -1,46 +1,160 @@
-use "std -> fs"   from "fs"
-use "std -> path" from "path"
+mod project
+mod hkconf
+mod opts
+mod target
+mod sh
+mod text
 
-fn overlay_root(staging: string) -> string is
-    return path::join(staging, "includes.chroot_after_packages")
+;; Branding: kopiuje 5 obrazów w miejsca docelowe ORAZ generuje pliki,
+;; które go aktywują (Calamares branding.desc + slideshow, motyw Plymouth,
+;; konfiguracja GRUB, splash bootloaderów live, hook chroot).
+
+fn overlay(cfg: string) -> string is
+    return path_join(cfg, "includes.chroot_after_packages")
 end
 
-fn copy_into(staging: string, rel_dir: string, src: string, dst_name: string) is
-    let dest_dir = path::join(overlay_root(staging), rel_dir)
-    fs::mkdir(dest_dir)
-    fs::copy(src, path::join(dest_dir, dst_name))
+fn put(cfg: string, rel_dir: string, src: string, dst_name: string) is
+    let dest_dir: string = path_join(overlay(cfg), rel_dir)
+    sh::mkdir_p(dest_dir)
+    sh::copy_file(src, path_join(dest_dir, dst_name))
 end
 
-;; `branding_dir` to ścieżka do branding/ w projekcie, `staging` to
-;; katalog roboczy, w którym livebuild.h# składa całą nakładkę przed
-;; wywołaniem `lb config`.
-pub fn stage(branding_dir: string, staging: string) is
-    let logo        = path::join(branding_dir, "logo.png")
-    let logo_bg_png = path::join(branding_dir, "logo-bg.png")
-    let logo_bg_jpg = path::join(branding_dir, "logo-bg.jpg")
-    let notext      = path::join(branding_dir, "notext-bg.png")
-    let banner      = path::join(branding_dir, "banner.png")
+fn q(s: string) -> string is
+    return "\"" + s + "\""
+end
 
-    ;; Calamares -- panel boczny instalatora (logo z tłem) + baner na
-    ;; ekranie powitalnym.
-    copy_into(staging, "etc/calamares/branding/legendaryos", logo_bg_png, "logo.png")
-    copy_into(staging, "etc/calamares/branding/legendaryos", banner, "show.png")
+pub fn calamares_desc(p: project::Project) -> string is
+    let nm: string = project::distro_name(p)
+    let ver: string = project::proj_version(p)
+    let home: string = hkconf::get_or(p.config, "branding", "home-url", "https://github.com/LegendaryOS")
+    let sup: string = hkconf::get_or(p.config, "branding", "support-url", home)
+    let mut o: string = "---\n"
+    o = o + "componentName: legendaryos\n"
+    o = o + "welcomeStyleCalamares: true\n"
+    o = o + "strings:\n"
+    o = o + "    productName: " + q(nm) + "\n"
+    o = o + "    shortProductName: " + q(nm) + "\n"
+    o = o + "    version: " + q(ver) + "\n"
+    o = o + "    shortVersion: " + q(ver) + "\n"
+    o = o + "    versionedName: " + q(nm + " " + ver) + "\n"
+    o = o + "    shortVersionedName: " + q(nm + " " + ver) + "\n"
+    o = o + "    bootloaderEntryName: " + q(nm) + "\n"
+    o = o + "    productUrl: " + q(home) + "\n"
+    o = o + "    supportUrl: " + q(sup) + "\n"
+    o = o + "    knownIssuesUrl: " + q(sup) + "\n"
+    o = o + "    releaseNotesUrl: " + q(home) + "\n"
+    o = o + "images:\n"
+    o = o + "    productLogo: \"logo.png\"\n"
+    o = o + "    productIcon: \"logo.png\"\n"
+    o = o + "    productWelcome: \"show.png\"\n"
+    o = o + "slideshow: \"show.qml\"\n"
+    o = o + "style:\n"
+    o = o + "    SidebarBackground: " + q(hkconf::get_or(p.config, "branding", "background", "#120C1E")) + "\n"
+    o = o + "    SidebarText: \"#FFFFFF\"\n"
+    o = o + "    SidebarTextSelect: " + q(hkconf::get_or(p.config, "branding", "accent", "#6236B0")) + "\n"
+    return o
+end
 
-    ;; Plymouth (splash startowy) -- wersja bez tła/tekstu, żeby dobrze
-    ;; wyglądała na dowolnym kolorze ekranu ładowania.
-    copy_into(staging, "usr/share/plymouth/themes/legendaryos", notext, "watermark.png")
+pub fn calamares_slideshow() -> string is
+    let mut o: string = "import QtQuick 2.0;\nimport calamares.slideshow 1.0;\n\n"
+    o = o + "Presentation {\n    id: presentation\n    Slide {\n"
+    o = o + "        Image {\n            source: \"show.png\"\n            anchors.fill: parent\n"
+    o = o + "            fillMode: Image.PreserveAspectFit\n        }\n    }\n}\n"
+    return o
+end
 
-    ;; GRUB -- .jpg, bo grub2 na wielu ustawieniach ma problem z
-    ;; przezroczystością PNG w tle menu.
-    copy_into(staging, "usr/share/legendaryos/grub", logo_bg_jpg, "background.jpg")
+pub fn plymouth_theme(p: project::Project) -> string is
+    let mut o: string = "[Plymouth Theme]\n"
+    o = o + "Name=" + project::distro_name(p) + "\n"
+    o = o + "Description=Ekran startowy " + project::distro_name(p) + "\n"
+    o = o + "ModuleName=script\n\n[script]\n"
+    o = o + "ImageDir=/usr/share/plymouth/themes/legendaryos\n"
+    o = o + "ScriptFile=/usr/share/plymouth/themes/legendaryos/legendaryos.script\n"
+    return o
+end
 
-    ;; Kopia "surowa" dla wszystkiego innego (motd, strona logowania,
-    ;; hdm itp.), żeby helpery mogły po prostu po nią sięgnąć.
-    copy_into(staging, "usr/share/legendaryos/branding", logo, "logo.png")
-    copy_into(staging, "usr/share/legendaryos/branding", banner, "banner.png")
-    copy_into(staging, "usr/share/legendaryos/branding", notext, "notext-bg.png")
-    copy_into(staging, "usr/share/legendaryos/branding", logo_bg_png, "logo-bg.png")
-    copy_into(staging, "usr/share/legendaryos/branding", logo_bg_jpg, "logo-bg.jpg")
+pub fn plymouth_script(p: project::Project) -> string is
+    let c: [int] = text::parse_hex(hkconf::get_or(p.config, "branding", "background", "#120C1E"))
+    let r: string = text::frac(c[0])
+    let g: string = text::frac(c[1])
+    let b: string = text::frac(c[2])
+    let mut o: string = "Window.SetBackgroundTopColor(" + r + ", " + g + ", " + b + ");\n"
+    o = o + "Window.SetBackgroundBottomColor(" + r + ", " + g + ", " + b + ");\n\n"
+    o = o + "logo = Image(\"watermark.png\");\n"
+    o = o + "sprite = Sprite(logo);\n"
+    o = o + "sprite.SetX(Window.GetWidth() / 2 - logo.GetWidth() / 2);\n"
+    o = o + "sprite.SetY(Window.GetHeight() / 2 - logo.GetHeight() / 2);\n"
+    return o
+end
 
-    write("  \x1b[32m✔\x1b[0m branding wpięty w nakładkę live-build")
+pub fn grub_defaults(p: project::Project) -> string is
+    let mut o: string = "# wygenerowane przez legendaryos-builder\n"
+    o = o + "GRUB_DISTRIBUTOR=" + q(project::distro_name(p)) + "\n"
+    o = o + "GRUB_BACKGROUND=\"/usr/share/legendaryos/grub/background.jpg\"\n"
+    o = o + "GRUB_COLOR_NORMAL=\"white/black\"\n"
+    o = o + "GRUB_COLOR_HIGHLIGHT=\"black/light-gray\"\n"
+    return o
+end
+
+;; Hook live-build (natywny format live-build: *.hook.chroot jest
+;; uruchamiany w chroot; to jedyny plik z shellem, GENEROWANY -- skrypty
+;; PROJEKTU nadal muszą być .hl).
+pub fn chroot_hook(kind: string) -> string is
+    let mut o: string = "#!/bin/sh\n# wygenerowane przez legendaryos-builder -- nie edytuj\nset -e\n"
+    o = o + "if command -v plymouth-set-default-theme >/dev/null 2>&1 && [ -d /usr/share/plymouth/themes/legendaryos ]; then\n"
+    o = o + "    plymouth-set-default-theme legendaryos || true\nfi\n"
+    if kind == "pc" is
+        o = o + "if [ -f /etc/calamares/settings.conf ]; then\n"
+        o = o + "    sed -i 's/^branding:.*/branding: legendaryos/' /etc/calamares/settings.conf\nfi\n"
+    end
+    o = o + "if command -v update-initramfs >/dev/null 2>&1; then update-initramfs -u || true; fi\n"
+    return o
+end
+
+;; Zwraca liczbę wygenerowanych/skopiowanych plików.
+pub fn stage(p: project::Project, t: target::Target, cfg: string) -> int is
+    let b: string = path_join(p.root, "branding")
+    let logo: string = path_join(b, "logo.png")
+    let logo_bg_png: string = path_join(b, "logo-bg.png")
+    let logo_bg_jpg: string = path_join(b, "logo-bg.jpg")
+    let notext: string = path_join(b, "notext-bg.png")
+    let banner: string = path_join(b, "banner.png")
+    let ov: string = overlay(cfg)
+
+    ;; surowe kopie dla motd, ekranów logowania, helperów itp.
+    put(cfg, "usr/share/legendaryos/branding", logo, "logo.png")
+    put(cfg, "usr/share/legendaryos/branding", banner, "banner.png")
+    put(cfg, "usr/share/legendaryos/branding", notext, "notext-bg.png")
+    put(cfg, "usr/share/legendaryos/branding", logo_bg_png, "logo-bg.png")
+    put(cfg, "usr/share/legendaryos/branding", logo_bg_jpg, "logo-bg.jpg")
+
+    ;; Plymouth -- ekran startowy (komputery i telefony)
+    let ply: string = "usr/share/plymouth/themes/legendaryos"
+    put(cfg, ply, notext, "watermark.png")
+    sh::write_text(path_join(ov, ply + "/legendaryos.plymouth"), plymouth_theme(p))
+    sh::write_text(path_join(ov, ply + "/legendaryos.script"), plymouth_script(p))
+    let mut n: int = 8
+
+    if t.kind == "pc" is
+        let cal: string = "etc/calamares/branding/legendaryos"
+        put(cfg, cal, logo_bg_png, "logo.png")
+        put(cfg, cal, banner, "show.png")
+        sh::write_text(path_join(ov, cal + "/branding.desc"), calamares_desc(p))
+        sh::write_text(path_join(ov, cal + "/show.qml"), calamares_slideshow())
+
+        put(cfg, "usr/share/legendaryos/grub", logo_bg_jpg, "background.jpg")
+        sh::write_text(path_join(ov, "etc/default/grub.d/legendaryos.cfg"), grub_defaults(p))
+
+        ;; splash menu live (isolinux / grub-pc z live-build: config/bootloaders)
+        sh::mkdir_p(path_join(cfg, "bootloaders/isolinux"))
+        sh::copy_file(logo_bg_png, path_join(cfg, "bootloaders/isolinux/splash.png"))
+        sh::mkdir_p(path_join(cfg, "bootloaders/grub-pc"))
+        sh::copy_file(logo_bg_png, path_join(cfg, "bootloaders/grub-pc/splash.png"))
+        n = n + 9
+    end
+
+    let hook: string = path_join(cfg, "hooks/live/0900-legendaryos-branding.hook.chroot")
+    sh::write_text(hook, chroot_hook(t.kind))
+    sh::run("chmod +x " + sh::sq(hook))
+    return n + 1
 end
