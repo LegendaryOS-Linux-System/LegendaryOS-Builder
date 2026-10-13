@@ -1,0 +1,78 @@
+extern static [c] is
+    fn system(cmd: string) -> int
+end
+
+extern static [c] is
+    fn exit(code: int)
+end
+
+;; Jedyne miejsce, które woła libc `system`. Zwraca status oczekiwania
+;; (0 = sukces, cokolwiek innego = porażka).
+fn raw(cmd: string) -> int is
+    return system(cmd)
+end
+
+pub fn quit(code: int) is
+    exit(code)
+end
+
+;; POSIX single-quote -- bezpieczne wstawienie dowolnej wartości do
+;; polecenia powłoki.
+pub fn sq(s: string) -> string is
+    return "'" + string_replace(s, "'", "'\\''") + "'"
+end
+
+pub fn run(cmd: string) -> int is
+    return raw(cmd)
+end
+
+;; Uruchom `cmd` w katalogu `dir` (cd + &&).
+pub fn in_dir(dir: string, cmd: string) -> int is
+    return raw("cd " + sq(dir) + " && " + cmd)
+end
+
+;; stdout polecenia, przycięty.
+pub fn capture(cmd: string) -> string is
+    return string_trim(shell(cmd))
+end
+
+pub fn tool_exists(name: string) -> bool is
+    return raw("command -v " + sq(name) + " >/dev/null 2>&1") == 0
+end
+
+pub fn mkdir_p(dir: string) -> bool is
+    return raw("mkdir -p " + sq(dir)) == 0
+end
+
+pub fn rm_rf(path: string) -> bool is
+    return raw("rm -rf " + sq(path)) == 0
+end
+
+;; Skopiuj ZAWARTOŚĆ katalogu src do dst (tworzy dst, zachowuje atrybuty).
+pub fn copy_tree(src: string, dst: string) -> bool is
+    return raw("mkdir -p " + sq(dst) + " && cp -a " + sq(src) + "/. " + sq(dst) + "/") == 0
+end
+
+pub fn copy_file(src: string, dst: string) -> bool is
+    return raw("cp -f " + sq(src) + " " + sq(dst)) == 0
+end
+
+pub fn is_root() -> bool is
+    return capture("id -u") == "0"
+end
+
+pub fn now() -> int is
+    return conv_str_to_int(capture("date +%s"))
+end
+
+pub fn free_mb(path: string) -> int is
+    let out: string = capture("df -Pm " + sq(path) + " 2>/dev/null | awk 'NR==2{{print $4}}'")
+    if out == "" is return -1 end
+    return conv_str_to_int(out)
+end
+
+;; Zapis tekstu do pliku z utworzeniem katalogu nadrzędnego.
+pub fn write_text(path: string, content: string) is
+    mkdir_p(path_parent(path))
+    fs_write(path, content)
+end
