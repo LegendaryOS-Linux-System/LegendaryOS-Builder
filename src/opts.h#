@@ -1,0 +1,29 @@
+pub struct Options is
+    pub verbose:       bool
+    pub dry_run:       bool
+    pub keep_staging:  bool
+    pub no_base:       bool     ;; nie łącz z bazą HackerOS (build bez lustra)
+    pub assume_yes:    bool
+    pub strict:        bool     ;; ostrzeżenia walidacji traktuj jak błędy
+    pub clean_first:   bool
+    pub no_color:      bool
+    pub keep_going:    bool     ;; run-scripts: nie przerywaj na pierwszym błędzie
+    pub arch:          string   ;; nadpisanie [project] -> arch
+    pub suite:         string   ;; nadpisanie [release] -> suite
+    pub ref_name:      string   ;; nadpisanie [release] -> base-ref
+    pub iso_name:      string   ;; nadpisanie [build] -> iso-name
+    pub target:        string   ;; filtr celów: "pc" | "phone" | pełny zapis "phone:arm64:pinephone"
+    pub kind:          string   ;; `new`: pc | phone | both
+    pub device:        string   ;; `new`: id urządzenia
+    pub shell:         string   ;; shell: bash | zsh | fish (completions)
+end
+
+pub fn defaults() -> Options is
+    return Options {
+        verbose: false, dry_run: false, keep_staging: false, no_base: false,
+        assume_yes: false, strict: false, clean_first: false, no_color: false,
+        keep_going: false,
+        arch: "", suite: "", ref_name: "", iso_name: "",
+        target: "", kind: "", device: "", shell: "",
+    }
+end
