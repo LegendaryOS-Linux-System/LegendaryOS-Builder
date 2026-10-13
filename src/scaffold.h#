@@ -1,79 +1,89 @@
-mod hkconf
+mod opts
+mod devices
+mod sh
+mod ui
 
-use "std -> fs"      from "fs"
-use "std -> path"    from "path"
-use "std -> base64"  from "b64"
+use "std -> base64" from "b64"
 
-;; 1x1 px, kolor #6236B0 (fiolet LegendaryOS) -- realny, poprawny PNG,
-;; nie pusty plik. Wystarczy jako miejsce startowe; docelowy branding
-;; podmienia się plikami o właściwym rozmiarze (patrz README.adoc,
-;; sekcja "branding/").
-fn placeholder_png_b64() -> string is
+;; `legendaryos-builder new <nazwa> [--kind pc|phone|both] [--device ID]`
+
+pub fn placeholder_png_b64() -> string is
     return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNIMtvwHwAEjgJIbDiblwAAAABJRU5ErkJggg=="
 end
 
 ;; 1x1 px, kolor #120C1E (tło LegendaryOS) jako JPEG -- dla logo-bg.jpg.
-fn placeholder_jpg_b64() -> string is
+pub fn placeholder_jpg_b64() -> string is
     return "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSj/2wBDAQcHBwoIChMKChMoGhYaKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCj/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5qooorpKP/9k="
 end
 
-fn write_placeholder(path_out: string, b64: string) is
-    fs::write_bytes(path_out, b64::decode_bytes(b64))
+fn write_placeholder(path_out: string, b64_data: string) is
+    fs_write_bytes(path_out, b64::decode_bytes(b64_data))
 end
 
-fn tpl_config_hk(name: string) -> string is
-    return "[project]\n" +
-           "-> name    => " + name + "\n" +
-           "-> tag     => stable\n" +
-           "-> arch    => amd64\n" +
-           "\n" +
-           "[release]\n" +
-           "-> base    => hackeros\n" +
-           "-> base-ref => official\n" +
-           "-> suite   => trixie\n" +
-           "\n" +
-           "[branding]\n" +
-           "-> distro-name => " + name + "\n" +
-           "-> theme       => legendary-gold\n" +
-           "\n" +
-           "[build]\n" +
-           "-> mode     => live-build\n" +
-           "-> iso-name => " + name + "\n"
+;; Lista celów dla szablonu config.hk.
+pub fn targets_for(kind: string, device: string) -> string is
+    if kind == "phone" is return "[phone:arm64:" + device + "]" end
+    if kind == "both" is return "[pc:amd64, pc:arm64, phone:arm64:" + device + "]" end
+    return "[pc:amd64]"
 end
 
-;; Rozdzielone od config.hk celowo -- to plik z sekretem (token), łatwiej
-;; go trzymać poza kontrolą wersji (.gitignore) niż gdyby był wymieszany
-;; z resztą metadanych projektu w config.hk. Ten sam powód, dla którego
-;; HackerOS-Builder wstrzykuje [auth] -> token do config.hk z env CI
-;; zamiast trzymać go w repo na stałe -- tu po prostu poszliśmy o krok
-;; dalej i token od razu ma swój własny plik.
-fn tpl_user_hk() -> string is
-    return "[account]\n" +
-           "-> type => organisation\n" +
-           "-> name => \n" +
-           "\n" +
-           "[auth]\n" +
-           "-> token => \n"
+pub fn tpl_config_hk(name: string, kind: string, device: string) -> string is
+    let mut o: string = ";; config.hk -- metadane projektu i wydania " + name + "\n\n"
+    o = o + "[project]\n"
+    o = o + "-> name    => " + name + "\n"
+    o = o + "-> tag     => stable\n"
+    o = o + "-> version => 1.0\n"
+    o = o + ";; cele budowy: pc:<arch> (ISO) albo phone:<arch>:<urządzenie> (obraz telefonu)\n"
+    o = o + ";; urządzenia: legendaryos-builder devices\n"
+    o = o + "-> targets => " + targets_for(kind, device) + "\n\n"
+    o = o + "[release]\n"
+    o = o + "-> base     => hackeros\n"
+    o = o + "-> base-ref => official\n"
+    o = o + "-> suite    => trixie\n\n"
+    o = o + "[branding]\n"
+    o = o + "-> distro-name => " + name + "\n"
+    o = o + "-> theme       => legendary-gold\n"
+    o = o + "-> accent      => #6236B0\n"
+    o = o + "-> background  => #120C1E\n\n"
+    o = o + "[build]\n"
+    o = o + "-> mode     => live-build\n"
+    o = o + "-> iso-name => " + name + "\n\n"
+    o = o + "[packages]\n"
+    o = o + ";; -> desktop => xfce       ;; none | xfce | gnome | kde  (tylko komputery)\n"
+    o = o + ";; -> include => [vim, htop]\n"
+    o = o + ";; -> exclude => [os-prober]\n\n"
+    o = o + "[base]\n"
+    o = o + ";; co importować z bazy HackerOS: package-lists, hooks, includes\n"
+    o = o + "-> import => [package-lists]\n"
+    if kind == "phone" || kind == "both" is
+        o = o + "\n[mobile]\n"
+        o = o + "-> shell => phosh\n"
+        o = o + ";; -> rootfs-size => 4096   ;; MiB; domyślnie liczone automatycznie\n"
+        o = o + ";; -> cmdline     => quiet\n"
+    end
+    return o
 end
 
-fn tpl_build_hl(name: string) -> string is
+pub fn tpl_user_hk(name: string) -> string is
+    return "[account]\n-> type => organisation\n-> name => " + name + "\n\n[auth]\n;; token może też przyjść z env LEGENDARYOS_TOKEN (CI)\n-> token =>\n"
+end
+
+pub fn tpl_build_hl(name: string) -> string is
     return "#!/usr/bin/hl\n" +
            "/// build.hl -- opis kroków budowy " + name + " (Hacker Lang)\n" +
            "using <gen 2>\n" +
            "\n" +
-           "%ISO_NAME: str = " + name + "\n" +
-           "\n" +
            "~> ==> " + name + " -- start budowy\n" +
-           "\n" +
-           "> legendaryos-builder stage .\n" +
-           "? err\n" +
-           "    ~> BŁĄD: przygotowanie nakładki live-build nie powiodło się.\n" +
-           "    > exit 1\n" +
-           "done\n" +
            "\n" +
            "> legendaryos-builder run-scripts .\n" +
            "? err\n" +
            "    ~> BŁĄD: jeden ze skryptów scripts/*.hl zwrócił błąd.\n" +
+           "    > exit 1\n" +
+           "done\n" +
+           "\n" +
+           "> legendaryos-builder stage .\n" +
+           "? err\n" +
+           "    ~> BŁĄD: przygotowanie nakładki live-build nie powiodło się.\n" +
            "    > exit 1\n" +
            "done\n" +
            "\n" +
@@ -89,55 +99,85 @@ fn tpl_build_hl(name: string) -> string is
            "    > exit 1\n" +
            "done\n" +
            "\n" +
-           "~> ==> Gotowe! Szukaj @ISO_NAME*.iso w build/config/\n"
+           "~> ==> Gotowe! Artefakty: build/out/\n"
 end
 
-fn tpl_example_script(name: string) -> string is
+pub fn tpl_example_script(name: string) -> string is
     return "#!/usr/bin/hl\n" +
-           "/// 10-motd.hl -- przykładowy hook after-packages dla " + name + "\n" +
+           "/// 10-prepare.hl -- przykładowy hook przed budową " + name + "\n" +
+           "/// Katalogiem roboczym jest korzeń projektu; to, co trafi do files/,\n" +
+           "/// zostanie skopiowane 1:1 do obrazu.\n" +
            "using <gen 2>\n" +
            "\n" +
-           "~> ==> Ustawianie komunikatu dnia " + name + "...\n" +
-           "> mkdir -p files/etc\n" +
+           "~> ==> Przygotowanie files/ dla " + name + "...\n" +
+           "> mkdir -p files/etc/skel\n" +
            "? err\n" +
-           "    ~> BŁĄD: nie udało się przygotować files/etc\n" +
+           "    ~> BŁĄD: nie udało się przygotować files/etc/skel\n" +
            "    > exit 1\n" +
            "done\n" +
            "\n" +
            "~> ==> Gotowe.\n"
 end
 
-pub fn create(name: string) -> bool is
-    if fs::exists(name) is
-        write("  \x1b[31m✘\x1b[0m katalog '" + name + "' już istnieje")
+fn base_name(path: string) -> string is
+    let mut p: string = path
+    while string_len(p) > 1 && string_ends_with(p, "/") is
+        p = string_slice(p, 0, string_len(p) - 1)
+    end
+    let parts: [string] = string_split(p, "/")
+    return parts[array_len(parts) - 1]
+end
+
+;; `dir` = katalog docelowy (może być ścieżką); nazwa projektu = jego ostatni człon.
+pub fn create(dir: string, o: opts::Options) -> bool is
+    let name: string = base_name(dir)
+    if fs_exists(dir) is
+        ui::fail("katalog '" + dir + "' już istnieje")
+        return false
+    end
+    if name == "" || name == "." || name == ".." is
+        ui::fail("podaj nazwę projektu (np. MojeOS)")
+        return false
+    end
+    let mut kind: string = o.kind
+    if kind == "" is kind = "pc" end
+    if kind != "pc" && kind != "phone" && kind != "both" is
+        ui::fail("--kind musi być: pc, phone albo both (podano '" + kind + "')")
+        return false
+    end
+    let mut device: string = o.device
+    if (kind == "phone" || kind == "both") && device == "" is device = "pinephone" end
+    if device != "" && devices::find(device).id == "" is
+        ui::fail("nieznane urządzenie '" + device + "' (dostępne: " + str_join(devices::ids(), ", ") + ")")
         return false
     end
 
-    fs::mkdir(name)
-    fs::mkdir(path::join(name, "branding"))
-    fs::mkdir(path::join(name, "scripts"))
-    fs::mkdir(path::join(name, "files"))
+    sh::mkdir_p(dir)
+    sh::mkdir_p(path_join(dir, "branding"))
+    sh::mkdir_p(path_join(dir, "scripts"))
+    sh::mkdir_p(path_join(dir, "files"))
 
-    let branding = path::join(name, "branding")
-    write_placeholder(path::join(branding, "logo.png"), placeholder_png_b64())
-    write_placeholder(path::join(branding, "logo-bg.png"), placeholder_png_b64())
-    write_placeholder(path::join(branding, "notext-bg.png"), placeholder_png_b64())
-    write_placeholder(path::join(branding, "banner.png"), placeholder_png_b64())
-    write_placeholder(path::join(branding, "logo-bg.jpg"), placeholder_jpg_b64())
+    let branding: string = path_join(dir, "branding")
+    write_placeholder(path_join(branding, "logo.png"), placeholder_png_b64())
+    write_placeholder(path_join(branding, "logo-bg.png"), placeholder_png_b64())
+    write_placeholder(path_join(branding, "notext-bg.png"), placeholder_png_b64())
+    write_placeholder(path_join(branding, "banner.png"), placeholder_png_b64())
+    write_placeholder(path_join(branding, "logo-bg.jpg"), placeholder_jpg_b64())
 
-    fs::write(path::join(name, "scripts/10-motd.hl"), tpl_example_script(name))
-    fs::write(path::join(name, "files/.gitkeep"), "")
-    fs::write(path::join(name, "build.hl"), tpl_build_hl(name))
-    fs::write(path::join(name, "config.hk"), tpl_config_hk(name))
-    fs::write(path::join(name, "user.hk"), tpl_user_hk())
-    fs::write(path::join(name, ".gitignore"), "user.hk\nbuild/\n")
+    fs_write(path_join(dir, "scripts/10-prepare.hl"), tpl_example_script(name))
+    fs_write(path_join(dir, "files/.gitkeep"), "")
+    fs_write(path_join(dir, "build.hl"), tpl_build_hl(name))
+    fs_write(path_join(dir, "config.hk"), tpl_config_hk(name, kind, device))
+    fs_write(path_join(dir, "user.hk"), tpl_user_hk(name))
+    fs_write(path_join(dir, ".gitignore"), "user.hk\nbuild/\n")
 
-    write("  \x1b[32m✔\x1b[0m utworzono projekt '" + name + "'")
-    write("")
-    write("  Dalej:")
-    write("    1. Podmień pliki w " + name + "/branding/ na docelową grafikę")
-    write("    2. Uzupełnij " + name + "/user.hk (organizacja + token)")
-    write("    3. legendaryos-builder validate " + name)
-    write("    4. legendaryos-builder build " + name)
+    ui::ok("utworzono projekt '" + name + "' w " + dir + " (cele: " + targets_for(kind, device) + ")")
+    ui::blank()
+    ui::plain("  Dalej:")
+    ui::plain("    1. Podmień pliki w " + dir + "/branding/ na docelową grafikę")
+    ui::plain("    2. Uzupełnij " + dir + "/user.hk (organizacja + token)")
+    ui::plain("    3. legendaryos-builder validate " + dir)
+    ui::plain("    4. legendaryos-builder doctor " + dir)
+    ui::plain("    5. sudo legendaryos-builder build " + dir)
     return true
 end
