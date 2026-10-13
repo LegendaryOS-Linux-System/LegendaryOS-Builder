@@ -1,81 +1,259 @@
 mod hkconf
+mod opts
+mod version
+mod sh
+mod devices
+mod text
 
-use "std -> fs"      from "fs"
-use "std -> path"    from "path"
-use "std -> strings" from "str"
+;; Model projektu + pełna walidacja struktury i zawartości.
+;; Wynik walidacji to lista `Issue` -- każdy może wskazywać miejsce w
+;; config.hk/user.hk (offset+długość), a diag.h# renderuje to przez nidus.
 
 pub fn required_branding_files() -> [string] is
     return ["banner.png", "logo-bg.jpg", "logo-bg.png", "logo.png", "notext-bg.png"]
 end
 
 pub struct Project is
-    pub root:      string
-    pub config:    hkconf::HkFile
-    pub user:      hkconf::HkFile
+    pub root:   string
+    pub config: hkconf::HkFile
+    pub user:   hkconf::HkFile
 end
 
-;; Wynik walidacji: lista błędów (pusta = OK) + lista ostrzeżeń
-;; (np. pusty token w user.hk -- nie blokuje, ale ostrzega, dokładnie
-;; tak jak build/build-hackeros-atomic robi to dla ATOMIC_TOKEN).
+pub struct Issue is
+    pub is_error: bool
+    pub code:     string    ;; krótki identyfikator, np. "config::arch"
+    pub message:  string
+    pub file:     string    ;; "config.hk" | "user.hk" | "" (bez źródła)
+    pub off:      int       ;; -1 = brak podświetlenia
+    pub len:      int
+    pub label:    string
+    pub help:     string
+end
+
 pub struct ValidationResult is
-    pub errors:   [string]
-    pub warnings: [string]
+    pub issues: [Issue]
+end
+
+pub fn load(root: string) -> Project is
+    return Project {
+        root:   root,
+        config: hkconf::load(path_join(root, "config.hk")),
+        user:   hkconf::load(path_join(root, "user.hk")),
+    }
+end
+
+;; ── wartości efektywne (config.hk + nadpisania z flag) ───────────────
+
+pub fn name(p: Project) -> string is
+    return hkconf::get_or(p.config, "project", "name", "legendaryos")
+end
+
+pub fn distro_name(p: Project) -> string is
+    return hkconf::get_or(p.config, "branding", "distro-name", name(p))
+end
+
+pub fn tag(p: Project) -> string is
+    return hkconf::get_or(p.config, "project", "tag", "stable")
+end
+
+pub fn proj_version(p: Project) -> string is
+    return hkconf::get_or(p.config, "project", "version", "1.0")
+end
+
+;; Architektury do zbudowania: flaga --arch ma pierwszeństwo, inaczej cała
+;; lista z [project] -> arch (np. `[amd64, arm64]` = komputery + telefony).
+pub fn arches(p: Project, o: opts::Options) -> [string] is
+    if o.arch != "" is return [o.arch] end
+    let l: [string] = hkconf::get_list(p.config, "project", "arch")
+    if array_len(l) == 0 is return ["amd64"] end
+    return l
+end
+
+pub fn suite(p: Project, o: opts::Options) -> string is
+    if o.suite != "" is return o.suite end
+    return hkconf::get_or(p.config, "release", "suite", "trixie")
+end
+
+pub fn base_ref(p: Project, o: opts::Options) -> string is
+    if o.ref_name != "" is return o.ref_name end
+    return hkconf::get_or(p.config, "release", "base-ref", "official")
+end
+
+pub fn base_url(p: Project) -> string is
+    return hkconf::get_or(p.config, "release", "base-url", version::upstream_url())
+end
+
+pub fn iso_name(p: Project, o: opts::Options) -> string is
+    if o.iso_name != "" is return o.iso_name end
+    return hkconf::get_or(p.config, "build", "iso-name", name(p))
+end
+
+;; Token: user.hk ma pierwszeństwo przed zmienną środowiskową
+;; LEGENDARYOS_TOKEN (wygodną w CI, gdzie user.hk nie istnieje).
+pub fn token(p: Project) -> string is
+    let t: string = hkconf::get(p.user, "auth", "token")
+    if t != "" is return t end
+    return env_get("LEGENDARYOS_TOKEN")
+end
+
+pub fn build_dir(p: Project) -> string is
+    return path_join(p.root, "build")
+end
+
+;; ── Issue ────────────────────────────────────────────────────────────
+
+pub fn errors_count(v: ValidationResult) -> int is
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < array_len(v.issues) is
+        if v.issues[i].is_error is n += 1 end
+        i += 1
+    end
+    return n
+end
+
+pub fn warnings_count(v: ValidationResult) -> int is
+    return array_len(v.issues) - errors_count(v)
 end
 
 pub fn is_ok(v: ValidationResult) -> bool is
-    return v.errors.len() == 0
+    return errors_count(v) == 0
 end
 
-fn add_error(v: ValidationResult, msg: string) -> ValidationResult is
-    let mut errs = v.errors
-    errs.push(msg)
-    return ValidationResult { errors: errs, warnings: v.warnings }
+fn push_issue(v: ValidationResult, is_err: bool, code: string, msg: string, file: string,
+              off: int, len: int, label: string, help: string) -> ValidationResult is
+    let mut list = v.issues
+    list.push(Issue { is_error: is_err, code: code, message: msg, file: file,
+                      off: off, len: len, label: label, help: help })
+    return ValidationResult { issues: list }
 end
 
-fn add_warning(v: ValidationResult, msg: string) -> ValidationResult is
-    let mut warns = v.warnings
-    warns.push(msg)
-    return ValidationResult { errors: v.errors, warnings: warns }
+;; Problem bez wskazania miejsca w pliku .hk.
+fn plain(v: ValidationResult, is_err: bool, code: string, msg: string, help: string) -> ValidationResult is
+    return push_issue(v, is_err, code, msg, "", -1, 0, "", help)
 end
 
-fn check_branding(root: string, v: ValidationResult) -> ValidationResult is
-    let dir = path::join(root, "branding")
-    let mut result = v
-    if !fs::is_dir(dir) is
-        return add_error(result, "brak katalogu branding/")
+fn base_name(path: string) -> string is
+    let parts: [string] = string_split(path, "/")
+    return parts[array_len(parts) - 1]
+end
+
+;; Problem z miejscem w pliku: `loc` = [offset, długość] albo [] (wtedy bez etykiety).
+fn at(v: ValidationResult, is_err: bool, code: string, msg: string, hk: hkconf::HkFile,
+      loc: [int], label: string, help: string) -> ValidationResult is
+    if array_len(loc) == 2 is
+        return push_issue(v, is_err, code, msg, base_name(hk.path), loc[0], loc[1], label, help)
     end
-    let required = required_branding_files()
-    let mut i = 0
-    while i < required.len() is
-        let p = path::join(dir, required[i])
-        if !fs::is_file(p) is
-            result = add_error(result, "brak pliku branding/" + required[i])
-        end
+    return push_issue(v, is_err, code, msg, base_name(hk.path), -1, 0, "", help)
+end
+
+;; Zamień ostrzeżenia na błędy (--strict).
+pub fn promote_warnings(v: ValidationResult) -> ValidationResult is
+    let mut list: [Issue] = []
+    let mut i: int = 0
+    while i < array_len(v.issues) is
+        let it: Issue = v.issues[i]
+        list.push(Issue { is_error: true, code: it.code, message: it.message + " (--strict)", file: it.file,
+                          off: it.off, len: it.len, label: it.label, help: it.help })
         i += 1
+    end
+    return ValidationResult { issues: list }
+end
+
+;; ── obrazy brandingu ─────────────────────────────────────────────────
+
+;; Surowy odczyt pierwszych `n` bajtów jako hex bez spacji ("89504e47...").
+fn head_hex(path: string, n: int) -> string is
+    let out: string = sh::capture("od -An -tx1 -N" + to_string(n) + " " + sh::sq(path) + " 2>/dev/null")
+    return string_replace_all(string_replace_all(out, " ", ""), "\n", "")
+end
+
+;; Szerokość/wysokość PNG z nagłówka IHDR (bajty 16..23, big-endian).
+;; Zwraca [w, h] albo [] gdy się nie da.
+pub fn png_size(path: string) -> [int] is
+    let out: string = sh::capture("od -An -tu1 -j16 -N8 " + sh::sq(path) + " 2>/dev/null")
+    let parts: [string] = string_split(string_trim(string_replace_all(out, "  ", " ")), " ")
+    let mut nums: [int] = []
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if string_trim(parts[i]) != "" is nums.push(conv_str_to_int(string_trim(parts[i]))) end
+        i += 1
+    end
+    if array_len(nums) < 8 is return [] end
+    let w: int = nums[0] * 16777216 + nums[1] * 65536 + nums[2] * 256 + nums[3]
+    let h: int = nums[4] * 16777216 + nums[5] * 65536 + nums[6] * 256 + nums[7]
+    return [w, h]
+end
+
+fn check_image(dir: string, file: string, v: ValidationResult) -> ValidationResult is
+    let full: string = path_join(dir, file)
+    let mut result: ValidationResult = v
+    if !fs_is_file(full) is
+        return plain(result, true, "branding::missing", "brak pliku branding/" + file,
+                     "dodaj plik albo uruchom `legendaryos-builder new` po wzorzec")
+    end
+    if fs_size(full) == 0 is
+        return plain(result, true, "branding::empty", "branding/" + file + " jest pusty", "")
+    end
+    if path_extension(file) == "png" is
+        if head_hex(full, 8) != "89504e470d0a1a0a" is
+            return plain(result, true, "branding::bad_png", "branding/" + file + " nie jest poprawnym PNG (zły nagłówek)",
+                         "wyeksportuj grafikę jako PNG")
+        end
+    else is
+        if head_hex(full, 3) != "ffd8ff" is
+            return plain(result, true, "branding::bad_jpeg", "branding/" + file + " nie jest poprawnym JPEG (zły nagłówek)",
+                         "GRUB wymaga JPEG w tle menu")
+        end
     end
     return result
 end
 
-;; scripts/ może istnieć i być puste -- ale jeśli coś w nim jest, MUSI
-;; mieć rozszerzenie .hl. Zero tolerancji dla .sh/.bash/.py itd. -- to
-;; jest twarde wymaganie z założeń projektu ("tylko Hacker Lang, żadnego
-;; Shella").
-fn check_scripts(root: string, v: ValidationResult) -> ValidationResult is
-    let dir = path::join(root, "scripts")
-    let mut result = v
-    if !fs::is_dir(dir) is
-        return add_error(result, "brak katalogu scripts/")
+fn check_branding(root: string, v: ValidationResult) -> ValidationResult is
+    let dir: string = path_join(root, "branding")
+    let mut result: ValidationResult = v
+    if !fs_is_dir(dir) is
+        return plain(result, true, "layout::branding", "brak katalogu branding/", "")
     end
-    let names = fs::list_dir(dir)
-    let mut i = 0
-    while i < names.len() is
-        let name = names[i]
-        let full = path::join(dir, name)
-        if fs::is_file(full) is
-            if path::extension(name) != "hl" is
-                result = add_error(result,
-                    "scripts/" + name + " -- niedozwolone rozszerzenie " +
-                    "(dozwolone jest WYŁĄCZNIE .hl, Hacker Lang; żadnego shella)")
+    let required: [string] = required_branding_files()
+    let mut small: [string] = []
+    let mut i: int = 0
+    while i < array_len(required) is
+        result = check_image(dir, required[i], result)
+        let full: string = path_join(dir, required[i])
+        if path_extension(required[i]) == "png" && fs_is_file(full) is
+            let sz: [int] = png_size(full)
+            if array_len(sz) == 2 && (sz[0] < 64 || sz[1] < 64) is small.push(required[i]) end
+        end
+        i += 1
+    end
+    if array_len(small) > 0 is
+        result = plain(result, false, "branding::placeholder",
+            "branding/: " + str_join(small, ", ") + " wyglądają na placeholdery (< 64 px)",
+            "podmień na docelową grafikę przed właściwym buildem")
+    end
+    return result
+end
+
+;; ── struktura katalogów ──────────────────────────────────────────────
+
+;; scripts/ może istnieć i być puste -- ale jeśli coś w nim jest, MUSI
+;; mieć rozszerzenie .hl. Zero tolerancji dla .sh/.bash/.py itd.
+fn check_scripts(root: string, v: ValidationResult) -> ValidationResult is
+    let dir: string = path_join(root, "scripts")
+    let mut result: ValidationResult = v
+    if !fs_is_dir(dir) is
+        return plain(result, true, "layout::scripts", "brak katalogu scripts/", "")
+    end
+    let names: [string] = string_split(sh::capture("ls -1A " + sh::sq(dir) + " 2>/dev/null"), "\n")
+    let mut i: int = 0
+    while i < array_len(names) is
+        let nm: string = names[i]
+        if nm != "" && !string_starts_with(nm, ".") && fs_is_file(path_join(dir, nm)) is
+            if path_extension(nm) != "hl" is
+                result = plain(result, true, "scripts::not_hl",
+                    "scripts/" + nm + " -- niedozwolone rozszerzenie",
+                    "dozwolone jest WYŁĄCZNIE .hl (Hacker Lang); żadnego shella")
             end
         end
         i += 1
@@ -84,84 +262,333 @@ fn check_scripts(root: string, v: ValidationResult) -> ValidationResult is
 end
 
 fn check_files_dir(root: string, v: ValidationResult) -> ValidationResult is
-    let dir = path::join(root, "files")
-    if !fs::is_dir(dir) is
-        return add_error(v, "brak katalogu files/ (nakładka after-packages)")
+    if !fs_is_dir(path_join(root, "files")) is
+        return plain(v, true, "layout::files", "brak katalogu files/ (nakładka after-packages)",
+                     "utwórz pusty katalog files/")
     end
     return v
 end
 
 fn check_build_hl(root: string, v: ValidationResult) -> ValidationResult is
-    let p = path::join(root, "build.hl")
-    if !fs::is_file(p) is
-        return add_error(v, "brak build.hl (opis kroków budowy w Hacker Lang)")
+    if !fs_is_file(path_join(root, "build.hl")) is
+        return plain(v, true, "layout::build_hl", "brak build.hl (opis kroków budowy w Hacker Lang)", "")
     end
     return v
 end
 
-fn check_config_hk(root: string, hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
-    let mut result = v
-    if !hk.exists is
-        return add_error(result, "brak config.hk")
+;; Opcjonalny katalog package-lists/ -- własne listy pakietów live-build.
+fn check_package_lists(root: string, v: ValidationResult) -> ValidationResult is
+    let dir: string = path_join(root, "package-lists")
+    let mut result: ValidationResult = v
+    if !fs_is_dir(dir) is return result end
+    let names: [string] = string_split(sh::capture("ls -1A " + sh::sq(dir) + " 2>/dev/null"), "\n")
+    let mut i: int = 0
+    while i < array_len(names) is
+        let nm: string = names[i]
+        if nm != "" && !string_ends_with(nm, ".list.chroot") && !string_ends_with(nm, ".list.binary") is
+            result = plain(result, false, "packages::list_name", "package-lists/" + nm + " -- zła nazwa",
+                "live-build czyta tylko *.list.chroot / *.list.binary")
+        end
+        i += 1
     end
-    if hkconf::get(hk, "project", "name") == "" is
-        result = add_error(result, "config.hk: brak [project] -> name")
+    return result
+end
+
+;; ── config.hk ────────────────────────────────────────────────────────
+
+fn known_keys(section: string) -> [string] is
+    if section == "project" is return ["name", "tag", "arch", "targets", "version", "description"] end
+    if section == "release" is return ["base", "base-ref", "base-url", "suite", "codename"] end
+    if section == "branding" is
+        return ["distro-name", "theme", "accent", "background", "home-url", "support-url", "bug-url"]
+    end
+    if section == "build" is
+        return ["mode", "iso-name", "volume-label", "publisher", "bootappend", "firmware"]
+    end
+    if section == "packages" is return ["include", "exclude", "recommends", "desktop"] end
+    if section == "system" is return ["motd", "hostname", "generate-identity"] end
+    if section == "base" is return ["import", "helper"] end
+    if section == "target" is return ["kind", "image"] end
+    if section == "mobile" is return ["device", "shell", "rootfs-size", "cmdline", "root-label"] end
+    return []
+end
+
+fn known_sections() -> [string] is
+    return ["project", "release", "branding", "build", "packages", "system", "base", "target", "mobile"]
+end
+
+pub fn known_kinds() -> [string] is return ["pc", "phone"] end
+pub fn known_images() -> [string] is return ["iso", "rootfs-tar", "raw-img", "android-img"] end
+pub fn known_shells() -> [string] is return ["phosh", "none"] end
+pub fn known_desktops() -> [string] is return ["none", "xfce", "gnome", "kde"] end
+
+fn is_hex_color(s: string) -> bool is
+    let t: string = string_trim(s)
+    if string_len(t) != 7 || !string_starts_with(t, "#") is return false end
+    let digits: string = "0123456789abcdefABCDEF"
+    let mut i: int = 1
+    while i < 7 is
+        if string_find(digits, string_at(t, i)) < 0 is return false end
+        i += 1
+    end
+    return true
+end
+
+;; Wartość musi należeć do `allowed` -- inaczej błąd z podpowiedzią.
+fn check_enum(v: ValidationResult, hk: hkconf::HkFile, section: string, key: string,
+              value: string, allowed: [string], is_err: bool) -> ValidationResult is
+    if array_contains(allowed, value) is return v end
+    let near: string = text::suggest(value, allowed)
+    let mut help: string = "dozwolone: " + str_join(allowed, ", ")
+    if near != "" is help = "czy chodziło o `" + near + "`? " + help end
+    return at(v, is_err, "config::" + key, "nieprawidłowa wartość `" + value + "` w [" + section + "] -> " + key,
+              hk, hkconf::locate_value(hk, section, key), "tu", help)
+end
+
+fn check_syntax(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result: ValidationResult = v
+    let mut i: int = 0
+    while i < array_len(hk.perr_msg) is
+        result = at(result, true, "syntax", hk.perr_msg[i], hk,
+                    [hk.perr_off[i], hk.perr_len[i]], "tutaj", hk.perr_help[i])
+        i += 1
+    end
+    return result
+end
+
+fn check_unknown(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result: ValidationResult = v
+    let secs: [string] = hkconf::sections(hk)
+    let mut i: int = 0
+    while i < array_len(secs) is
+        if !array_contains(known_sections(), secs[i]) is
+            let near: string = text::suggest(secs[i], known_sections())
+            let mut help: string = "znane sekcje: " + str_join(known_sections(), ", ")
+            if near != "" is help = "czy chodziło o `[" + near + "]`?" end
+            result = at(result, false, "config::unknown_section", "nieznana sekcja [" + secs[i] + "]",
+                        hk, hkconf::locate_section(hk, secs[i]), "ta sekcja jest ignorowana", help)
+        else is
+            let keys: [string] = hkconf::section_keys(hk, secs[i])
+            let mut j: int = 0
+            while j < array_len(keys) is
+                let base: string = (string_split(keys[j], "."))[0]
+                if !array_contains(known_keys(secs[i]), base) is
+                    let near: string = text::suggest(base, known_keys(secs[i]))
+                    let mut help: string = "znane klucze: " + str_join(known_keys(secs[i]), ", ")
+                    if near != "" is help = "czy chodziło o `" + near + "`?" end
+                    result = at(result, false, "config::unknown_key",
+                                "nieznany klucz [" + secs[i] + "] -> " + base, hk,
+                                hkconf::locate_key(hk, secs[i], keys[j]), "ten klucz jest ignorowany", help)
+                end
+                j += 1
+            end
+        end
+        i += 1
+    end
+    return result
+end
+
+;; Spójność: architektura <-> rodzaj celu (komputer/telefon) <-> urządzenie.
+;; [project] -> targets => [pc:amd64, phone:arm64:pinephone]
+fn check_target_specs(hk: hkconf::HkFile, specs: [string], v: ValidationResult) -> ValidationResult is
+    let mut result: ValidationResult = v
+    let loc: [int] = hkconf::locate_value(hk, "project", "targets")
+    let mut i: int = 0
+    while i < array_len(specs) is
+        let sp: [string] = devices::parse_spec(specs[i])
+        if array_len(sp) != 3 is
+            result = at(result, true, "config::targets", "niepoprawny cel `" + specs[i] + "`", hk, loc, "tu",
+                        "zapis: `pc:<arch>` albo `phone:<arch>:<urządzenie>`, np. pc:amd64, phone:arm64:pinephone")
+        else is
+            if !array_contains(version::known_arches(), sp[1]) is
+                result = at(result, true, "config::targets", "nieznana architektura `" + sp[1] + "` w celu `" + specs[i] + "`",
+                            hk, loc, "tu", "dozwolone: " + str_join(version::known_arches(), ", "))
+            end
+            if sp[0] == "phone" is
+                let dev: devices::Device = devices::find(sp[2])
+                if dev.id == "" is
+                    let near: string = text::suggest(sp[2], devices::ids())
+                    let mut help: string = "dostępne: " + str_join(devices::ids(), ", ")
+                    if near != "" is help = "czy chodziło o `" + near + "`? " + help end
+                    result = at(result, true, "config::device", "nieznane urządzenie `" + sp[2] + "` w celu `" + specs[i] + "`",
+                                hk, loc, "tu", help)
+                else is
+                    if dev.arch != sp[1] is
+                        result = at(result, true, "config::device_arch",
+                                    "urządzenie `" + sp[2] + "` jest " + dev.arch + ", a cel `" + specs[i] + "` podaje " + sp[1],
+                                    hk, loc, "tu", "użyj `phone:" + dev.arch + ":" + sp[2] + "`")
+                    end
+                end
+            end
+        end
+        i += 1
+    end
+    return result
+end
+
+fn check_targets(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result: ValidationResult = v
+    let specs: [string] = hkconf::get_list(hk, "project", "targets")
+    if array_len(specs) > 0 is
+        return check_target_specs(hk, specs, result)
+    end
+    let arches: [string] = hkconf::get_list(hk, "project", "arch")
+    let kind: string = hkconf::get_or(hk, "target", "kind", "pc")
+    let dev_id: string = hkconf::get(hk, "mobile", "device")
+
+    let mut a: int = 0
+    while a < array_len(arches) is
+        result = check_enum(result, hk, "project", "arch", arches[a], version::known_arches(), true)
+        a += 1
+    end
+
+    result = check_enum(result, hk, "target", "kind", kind, known_kinds(), true)
+
+    let imgs: [string] = hkconf::get_list(hk, "target", "image")
+    let mut m: int = 0
+    while m < array_len(imgs) is
+        result = check_enum(result, hk, "target", "image", imgs[m], known_images(), true)
+        if kind == "pc" && (imgs[m] == "raw-img" || imgs[m] == "android-img") is
+            result = at(result, true, "config::image_kind", "obraz `" + imgs[m] + "` jest dla telefonów, a [target] -> kind to pc",
+                        hk, hkconf::locate_value(hk, "target", "image"), "tu",
+                        "ustaw `-> kind => phone` albo użyj `iso`")
+        end
+        if kind == "phone" && imgs[m] == "iso" is
+            result = at(result, true, "config::image_kind", "obraz `iso` jest dla komputerów, a [target] -> kind to phone",
+                        hk, hkconf::locate_value(hk, "target", "image"), "tu",
+                        "dla telefonu użyj `raw-img`, `android-img` lub `rootfs-tar`")
+        end
+        m += 1
+    end
+
+    if kind == "phone" is
+        if dev_id == "" is
+            result = at(result, true, "config::device", "kind => phone wymaga [mobile] -> device",
+                        hk, hkconf::locate_value(hk, "target", "kind"), "tryb telefonu",
+                        "dostępne urządzenia: " + str_join(devices::ids(), ", "))
+        else is
+            let dev: devices::Device = devices::find(dev_id)
+            if dev.id == "" is
+                let near: string = text::suggest(dev_id, devices::ids())
+                let mut help: string = "dostępne: " + str_join(devices::ids(), ", ")
+                if near != "" is help = "czy chodziło o `" + near + "`? " + help end
+                result = at(result, true, "config::device", "nieznane urządzenie `" + dev_id + "`",
+                            hk, hkconf::locate_value(hk, "mobile", "device"), "tu", help)
+            else is
+                if array_len(arches) > 0 && !array_contains(arches, dev.arch) is
+                    result = at(result, true, "config::device_arch",
+                                "urządzenie `" + dev_id + "` jest " + dev.arch + ", a [project] -> arch to " + str_join(arches, ", "),
+                                hk, hkconf::locate_value(hk, "project", "arch"), "dodaj " + dev.arch,
+                                "np. `-> arch => [amd64, " + dev.arch + "]`")
+                end
+            end
+        end
+        result = check_enum(result, hk, "mobile", "shell", hkconf::get_or(hk, "mobile", "shell", "phosh"), known_shells(), true)
+        let sz: string = hkconf::get(hk, "mobile", "rootfs-size")
+        if sz != "" && (!string_is_digits(sz) || conv_str_to_int(sz) < 512) is
+            result = at(result, true, "config::rootfs_size", "[mobile] -> rootfs-size musi być liczbą MiB >= 512",
+                        hk, hkconf::locate_value(hk, "mobile", "rootfs-size"), "tu", "np. 4096")
+        end
+    else is
+        if dev_id != "" is
+            result = at(result, false, "config::device_ignored", "[mobile] -> device jest ignorowane dla kind => pc",
+                        hk, hkconf::locate_value(hk, "mobile", "device"), "ignorowane",
+                        "ustaw `[target] -> kind => phone`, jeśli to ma być obraz telefonu")
+        end
+    end
+    return result
+end
+
+fn string_is_digits(s: string) -> bool is
+    if s == "" is return false end
+    let digits: string = "0123456789"
+    let mut i: int = 0
+    while i < string_len(s) is
+        if string_find(digits, string_at(s, i)) < 0 is return false end
+        i += 1
+    end
+    return true
+end
+
+fn check_config_hk(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result: ValidationResult = v
+    if !hk.exists is
+        return plain(result, true, "layout::config_hk", "brak config.hk", "uruchom `legendaryos-builder new`")
+    end
+    result = check_syntax(hk, result)
+
+    let nm: string = hkconf::get(hk, "project", "name")
+    if nm == "" is
+        result = at(result, true, "config::name", "brak [project] -> name", hk,
+                    hkconf::locate_section(hk, "project"), "dodaj tu `-> name => ...`", "np. `-> name => MojeOS`")
     end
     if hkconf::get(hk, "release", "base") == "" is
-        result = add_warning(result,
-            "config.hk: brak [release] -> base -- zakładam \"hackeros\" (domyślną bazę)")
+        result = at(result, false, "config::base", "brak [release] -> base -- zakładam \"hackeros\"", hk,
+                    hkconf::locate_section(hk, "release"), "dodaj tu `-> base => hackeros`", "")
     end
+
+    let suite: string = hkconf::get_or(hk, "release", "suite", "trixie")
+    if !array_contains(version::known_suites(), suite) is
+        result = check_enum(result, hk, "release", "suite", suite, version::known_suites(), false)
+    end
+
+    let iso: string = hkconf::get_or(hk, "build", "iso-name", nm)
+    if string_find(iso, " ") >= 0 || string_find(iso, "/") >= 0 is
+        result = at(result, true, "config::iso_name", "[build] -> iso-name '" + iso + "' nie może zawierać spacji ani '/'",
+                    hk, hkconf::locate_value(hk, "build", "iso-name"), "tu", "np. `" + text::slug(iso) + "`")
+    end
+    let mode: string = hkconf::get_or(hk, "build", "mode", "live-build")
+    if mode != "live-build" is
+        result = check_enum(result, hk, "build", "mode", mode, ["live-build"], true)
+    end
+
+    let accent: string = hkconf::get(hk, "branding", "accent")
+    if accent != "" && !is_hex_color(accent) is
+        result = at(result, true, "config::accent", "[branding] -> accent musi mieć postać #RRGGBB", hk,
+                    hkconf::locate_value(hk, "branding", "accent"), "zły kolor", "np. #6236B0")
+    end
+    let bg: string = hkconf::get(hk, "branding", "background")
+    if bg != "" && !is_hex_color(bg) is
+        result = at(result, true, "config::background", "[branding] -> background musi mieć postać #RRGGBB", hk,
+                    hkconf::locate_value(hk, "branding", "background"), "zły kolor", "np. #120C1E")
+    end
+
+    let desktop: string = hkconf::get(hk, "packages", "desktop")
+    if desktop != "" is
+        result = check_enum(result, hk, "packages", "desktop", desktop, known_desktops(), true)
+    end
+
+    result = check_targets(hk, result)
+    result = check_unknown(hk, result)
     return result
 end
 
-fn check_user_hk(root: string, hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
-    let mut result = v
+fn check_user_hk(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
+    let mut result: ValidationResult = v
     if !hk.exists is
-        return add_error(result, "brak user.hk (organizacja + token)")
+        return plain(result, true, "layout::user_hk", "brak user.hk (organizacja + token)", "uruchom `legendaryos-builder new`")
     end
+    result = check_syntax(hk, result)
     if hkconf::get(hk, "account", "name") == "" is
-        result = add_error(result, "user.hk: brak [account] -> name")
+        result = at(result, true, "user::name", "brak [account] -> name", hk,
+                    hkconf::locate_section(hk, "account"), "dodaj tu `-> name => ...`", "nazwa organizacji")
     end
-    if hkconf::get(hk, "auth", "token") == "" is
-        result = add_warning(result,
-            "user.hk: [auth] -> token jest puste -- publikacja/pobieranie " +
-            "prywatnych zasobów organizacji może zostać odrzucone")
+    if hkconf::get(hk, "auth", "token") == "" && env_get("LEGENDARYOS_TOKEN") == "" is
+        result = at(result, false, "user::token", "[auth] -> token jest puste (ani LEGENDARYOS_TOKEN)", hk,
+                    hkconf::locate_key(hk, "auth", "token"), "pusty token",
+                    "pobieranie prywatnych zasobów organizacji może zostać odrzucone")
     end
     return result
-end
-
-;; Wczytaj projekt z `root` i zwaliduj CAŁĄ wymaganą strukturę na raz.
-;; Zawsze zwraca Project (nawet gdy walidacja się nie powiedzie) -- to
-;; walidacja (patrz `validate`) decyduje, czy wołający ma przerwać.
-pub fn load(root: string) -> Project is
-    let config = hkconf::load(path::join(root, "config.hk"))
-    let user   = hkconf::load(path::join(root, "user.hk"))
-    return Project { root: root, config: config, user: user }
 end
 
 pub fn validate(p: Project) -> ValidationResult is
-    let mut v = ValidationResult { errors: [], warnings: [] }
+    let mut v: ValidationResult = ValidationResult { issues: [] }
     v = check_branding(p.root, v)
     v = check_scripts(p.root, v)
     v = check_files_dir(p.root, v)
     v = check_build_hl(p.root, v)
-    v = check_config_hk(p.root, p.config, v)
-    v = check_user_hk(p.root, p.user, v)
+    v = check_package_lists(p.root, v)
+    v = check_config_hk(p.config, v)
+    v = check_user_hk(p.user, v)
     return v
-end
-
-pub fn print_report(v: ValidationResult) is
-    let mut i = 0
-    while i < v.errors.len() is
-        write("  \x1b[31m✘\x1b[0m " + v.errors[i])
-        i += 1
-    end
-    i = 0
-    while i < v.warnings.len() is
-        write("  \x1b[33m!\x1b[0m " + v.warnings[i])
-        i += 1
-    end
-    if is_ok(v) is
-        write("  \x1b[32m✔\x1b[0m struktura projektu jest poprawna")
-    end
 end
