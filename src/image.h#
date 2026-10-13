@@ -1,0 +1,177 @@
+mod project
+mod hkconf
+mod opts
+mod target
+mod devices
+mod sh
+mod ui
+
+;; Składanie obrazów TELEFONÓW z rootfs-u zbudowanego przez live-build.
+;;
+;; Bez loop-device i bez mount: system plików powstaje przez
+;; `mke2fs -d <katalog>` (e2fsprogs >= 1.43), a potem trafia `dd`-em do
+;; surowego obrazu pod offsetem 16 MiB, razem z blobami U-Boota na
+;; sektorach z profilu urządzenia. Wymaga roota (właściciele plików).
+;;
+;; UWAGA: tego kodu nie da się zweryfikować bez sprzętu -- traktuj obrazy
+;; jako punkt wyjścia i sprawdź offsety/bloby z dokumentacją urządzenia.
+
+pub fn root_label(p: project::Project) -> string is
+    return hkconf::get_or(p.config, "mobile", "root-label", "LEGENDARY_ROOT")
+end
+
+;; Rozmiar rootfs w MiB: z configu albo (zajętość + 25% + 256 MiB), min 1024.
+pub fn rootfs_size_mb(p: project::Project, chroot: string) -> int is
+    let cfg: string = hkconf::get(p.config, "mobile", "rootfs-size")
+    if cfg != "" is return conv_str_to_int(cfg) end
+    let used: string = sh::capture("du -sm " + sh::sq(chroot) + " 2>/dev/null | cut -f1")
+    let mut mb: int = 0
+    if used != "" is mb = conv_str_to_int(used) end
+    let sized: int = mb + mb / 4 + 256
+    if sized < 1024 is return 1024 end
+    return sized
+end
+
+;; Najnowsza wersja jądra w rootfs ("6.12.9-arm64") albo "".
+pub fn kernel_version(chroot: string) -> string is
+    return sh::capture("ls " + sh::sq(chroot + "/boot") + " 2>/dev/null | sed -n 's/^vmlinuz-//p' | sort -V | tail -1")
+end
+
+pub fn kernel_cmdline(p: project::Project, dev: devices::Device) -> string is
+    let mut c: string = "root=LABEL=" + root_label(p) + " rw rootwait quiet splash"
+    if dev.console != "" is c = c + " console=" + dev.console end
+    if dev.cmdline != "" is c = c + " " + dev.cmdline end
+    let extra: string = hkconf::get(p.config, "mobile", "cmdline")
+    if extra != "" is c = c + " " + extra end
+    return c
+end
+
+pub fn extlinux_conf(p: project::Project, dev: devices::Device, ver: string) -> string is
+    let mut o: string = "default legendaryos\ntimeout 3\nmenu title " + project::distro_name(p) + "\n\n"
+    o = o + "label legendaryos\n"
+    o = o + "    menu label " + project::distro_name(p) + "\n"
+    o = o + "    kernel /boot/vmlinuz-" + ver + "\n"
+    o = o + "    initrd /boot/initrd.img-" + ver + "\n"
+    o = o + "    fdtdir /usr/lib/linux-image-" + ver + "/\n"
+    o = o + "    append " + kernel_cmdline(p, dev) + "\n"
+    return o
+end
+
+;; Najmniejszy sektor bloba: <34 koliduje z tablicą GPT -> użyj MBR.
+pub fn needs_msdos(dev: devices::Device) -> bool is
+    let mut i: int = 0
+    while i < array_len(dev.blobs) is
+        let parts: [string] = string_split(dev.blobs[i], "@")
+        if array_len(parts) == 2 && conv_str_to_int(parts[1]) < 34 is return true end
+        i += 1
+    end
+    return false
+end
+
+fn run_step(o: opts::Options, desc: string, cmd: string) -> bool is
+    if o.verbose is ui::debug(cmd) end
+    if o.dry_run is
+        ui::muted("[dry-run] " + desc)
+        return true
+    end
+    if sh::run(cmd) != 0 is
+        ui::fail(desc + " -- nie powiodło się")
+        return false
+    end
+    return true
+end
+
+;; rootfs.tar.xz z katalogu chroot live-build.
+pub fn make_rootfs_tar(t: target::Target, o: opts::Options, out_name: string) -> bool is
+    let chroot: string = path_join(t.work_dir, "chroot")
+    let dst: string = path_join(t.out_dir, out_name + ".rootfs.tar.xz")
+    sh::mkdir_p(t.out_dir)
+    ui::info("pakuję rootfs -> " + dst)
+    return run_step(o, "tar rootfs",
+        "tar --numeric-owner -C " + sh::sq(chroot) + " -cpf - . | xz -T0 -c > " + sh::sq(dst))
+end
+
+;; Surowy obraz dla urządzeń z U-Bootem (extlinux).
+pub fn make_raw_img(p: project::Project, t: target::Target, o: opts::Options, dev: devices::Device, out_name: string) -> bool is
+    let chroot: string = path_join(t.work_dir, "chroot")
+    let mut ver: string = kernel_version(chroot)
+    if ver == "" && !o.dry_run is
+        ui::fail("nie znaleziono jądra w " + chroot + "/boot -- czy lista pakietów zawiera linux-image?")
+        return false
+    end
+    if ver == "" is ver = "DRY-RUN" end
+
+    let size: int = rootfs_size_mb(p, chroot)
+    let rootfs: string = path_join(t.work_dir, "rootfs.ext4")
+    let img: string = path_join(t.out_dir, out_name + ".img")
+    sh::mkdir_p(t.out_dir)
+
+    if !o.dry_run is
+        sh::write_text(path_join(chroot, "boot/extlinux/extlinux.conf"), extlinux_conf(p, dev, ver))
+    end
+    ui::info("obraz " + dev.id + ": rootfs " + to_string(size) + " MiB, jądro " + ver)
+
+    if !run_step(o, "mke2fs rootfs",
+        "mke2fs -q -F -t ext4 -L " + sh::sq(root_label(p)) + " -d " + sh::sq(chroot) + " " + sh::sq(rootfs) + " " + to_string(size) + "M") is
+        return false
+    end
+    if !run_step(o, "truncate obrazu", "truncate -s " + to_string(size + 16) + "M " + sh::sq(img)) is return false end
+
+    let mut parted: string = "parted -s " + sh::sq(img) + " mklabel gpt mkpart root ext4 16MiB 100% set 1 legacy_boot on"
+    if needs_msdos(dev) is
+        parted = "parted -s " + sh::sq(img) + " mklabel msdos mkpart primary ext4 16MiB 100% set 1 boot on"
+    end
+    if !run_step(o, "partycjonowanie", parted) is return false end
+    if !run_step(o, "zapis rootfs do obrazu",
+        "dd if=" + sh::sq(rootfs) + " of=" + sh::sq(img) + " bs=1M seek=16 conv=notrunc status=none") is
+        return false
+    end
+
+    let mut i: int = 0
+    while i < array_len(dev.blobs) is
+        let parts: [string] = string_split(dev.blobs[i], "@")
+        let src: string = chroot + parts[0]
+        if !o.dry_run && !fs_is_file(src) is
+            ui::fail("brak bloba U-Boota " + parts[0] + " w rootfs (pakiet " + str_join(dev.packages, "/") + "?)")
+            return false
+        end
+        if !run_step(o, "zapis bloba " + parts[0] + " @ sektor " + parts[1],
+            "dd if=" + sh::sq(src) + " of=" + sh::sq(img) + " bs=512 seek=" + parts[1] + " conv=notrunc status=none") is
+            return false
+        end
+        i += 1
+    end
+
+    sh::rm_rf(rootfs)
+    ui::info("kompresuję obraz (xz)")
+    return run_step(o, "xz obrazu", "xz -T0 -f " + sh::sq(img))
+end
+
+;; boot.img + rootfs.img dla urządzeń z fastboot (EKSPERYMENTALNE).
+pub fn make_android(p: project::Project, t: target::Target, o: opts::Options, dev: devices::Device, out_name: string) -> bool is
+    let chroot: string = path_join(t.work_dir, "chroot")
+    let mut ver: string = kernel_version(chroot)
+    if ver == "" && !o.dry_run is
+        ui::fail("nie znaleziono jądra w " + chroot + "/boot")
+        return false
+    end
+    if ver == "" is ver = "DRY-RUN" end
+    if !sh::tool_exists("mkbootimg") && !o.dry_run is
+        ui::fail("brak `mkbootimg` w PATH (pakiet mkbootimg)")
+        return false
+    end
+    sh::mkdir_p(t.out_dir)
+    let size: int = rootfs_size_mb(p, chroot)
+    let rootfs: string = path_join(t.out_dir, out_name + ".rootfs.img")
+    let boot: string = path_join(t.out_dir, out_name + ".boot.img")
+
+    if !run_step(o, "mke2fs rootfs.img",
+        "mke2fs -q -F -t ext4 -L " + sh::sq(root_label(p)) + " -d " + sh::sq(chroot) + " " + sh::sq(rootfs) + " " + to_string(size) + "M") is
+        return false
+    end
+    return run_step(o, "mkbootimg",
+        "mkbootimg --kernel " + sh::sq(chroot + "/boot/vmlinuz-" + ver) +
+        " --ramdisk " + sh::sq(chroot + "/boot/initrd.img-" + ver) +
+        " --pagesize " + to_string(dev.pagesize) + " --header_version " + to_string(dev.header) +
+        " --cmdline " + sh::sq(kernel_cmdline(p, dev)) + " -o " + sh::sq(boot))
+end
