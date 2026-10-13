@@ -1,164 +1,498 @@
 mod version
+mod opts
+mod sh
+mod ui
+mod hkconf
 mod project
+mod diag
+mod target
+mod devices
 mod scaffold
 mod livebuild
 mod scriptrunner
 mod gitsync
+mod release
+mod doctor
+mod completions
+mod packages
+mod selftest
 
-use "std -> env" from "env"
+;; Parsowanie argumentów i dyspozytor komend. Każda komenda zwraca kod
+;; wyjścia procesu (0 = sukces), więc `validate`/`build` nadają się do CI.
 
-fn dir_or_default(argv: [string], idx: int) -> string is
-    if idx < argv.len() is return argv[idx] end
-    return "."
+struct Parsed is
+    cmd:  string
+    args: [string]       ;; argumenty pozycyjne po komendzie
+    opts: opts::Options
+    bad:  string         ;; niepusty = błąd parsowania (komunikat)
 end
 
-;; Nie używamy tu typu opcjonalnego -- `LoadResult.ok` mówi wprost, czy
-;; `project` w ogóle nadaje się do dalszego użycia, bez polegania na
-;; dopasowywaniu `nil` po stronie wołającego.
+fn flag_takes_value(f: string) -> bool is
+    return f == "--arch" || f == "--suite" || f == "--ref" || f == "--iso-name" || f == "--target" ||
+           f == "--kind" || f == "--device"
+end
+
+fn apply_value(o: opts::Options, f: string, v: string) -> opts::Options is
+    let mut n: opts::Options = o
+    if f == "--arch" is n.arch = v end
+    if f == "--suite" is n.suite = v end
+    if f == "--ref" is n.ref_name = v end
+    if f == "--iso-name" is n.iso_name = v end
+    if f == "--target" is n.target = v end
+    if f == "--kind" is n.kind = v end
+    if f == "--device" is n.device = v end
+    return n
+end
+
+fn apply_switch(o: opts::Options, f: string) -> opts::Options is
+    let mut n: opts::Options = o
+    if f == "--verbose" || f == "-v" is n.verbose = true end
+    if f == "--dry-run" || f == "-n" is n.dry_run = true end
+    if f == "--keep-staging" is n.keep_staging = true end
+    if f == "--no-base" is n.no_base = true end
+    if f == "--yes" || f == "-y" is n.assume_yes = true end
+    if f == "--strict" is n.strict = true end
+    if f == "--clean" is n.clean_first = true end
+    if f == "--no-color" is n.no_color = true end
+    if f == "--keep-going" is n.keep_going = true end
+    return n
+end
+
+fn is_switch(f: string) -> bool is
+    return f == "--verbose" || f == "-v" || f == "--dry-run" || f == "-n" || f == "--keep-staging" ||
+           f == "--no-base" || f == "--yes" || f == "-y" || f == "--strict" || f == "--clean" ||
+           f == "--no-color" || f == "--keep-going"
+end
+
+;; argv[0] = program, argv[1] = komenda, reszta = flagi i argumenty.
+pub fn parse(argv: [string]) -> Parsed is
+    let mut o: opts::Options = opts::defaults()
+    let mut pos: [string] = []
+    let mut cmd: string = ""
+    let mut bad: string = ""
+    let mut i: int = 1
+    while i < array_len(argv) is
+        let a: string = argv[i]
+        i += 1
+        if cmd == "" && !string_starts_with(a, "-") is
+            cmd = a
+            continue
+        end
+        if cmd == "" && (a == "--help" || a == "-h") is
+            cmd = "help"
+            continue
+        end
+        if cmd == "" && (a == "--version" || a == "-V") is
+            cmd = "version"
+            continue
+        end
+        if string_starts_with(a, "--") && string_find(a, "=") > 0 is
+            let eq: int = string_find(a, "=")
+            let f: string = string_slice(a, 0, eq)
+            if flag_takes_value(f) is
+                o = apply_value(o, f, string_slice(a, eq + 1, string_len(a)))
+                continue
+            end
+        end
+        if flag_takes_value(a) is
+            if i >= array_len(argv) is
+                bad = "flaga " + a + " wymaga wartości"
+            else is
+                o = apply_value(o, a, argv[i])
+                i += 1
+            end
+            continue
+        end
+        if is_switch(a) is
+            o = apply_switch(o, a)
+            continue
+        end
+        if a == "--help" || a == "-h" is
+            cmd = "help"
+            continue
+        end
+        if string_starts_with(a, "-") && a != "-" is
+            bad = "nieznana flaga: " + a
+            continue
+        end
+        pos.push(a)
+    end
+    return Parsed { cmd: cmd, args: pos, opts: o, bad: bad }
+end
+
+fn arg_or(pr: Parsed, idx: int, fallback: string) -> string is
+    if idx < array_len(pr.args) is return pr.args[idx] end
+    return fallback
+end
+
+;; ── pomoc ────────────────────────────────────────────────────────────
+
+pub fn print_help() is
+    ui::plain(ui::banner(version::version()))
+    ui::plain("  Użycie: " + ui::code("legendaryos-builder <komenda> [argumenty] [opcje]"))
+    ui::title("Komendy")
+    ui::cmd_row("new <nazwa>", "utwórz szkielet projektu (--kind pc|phone|both, --device ID)")
+    ui::cmd_row("validate [ścieżka]", "zwaliduj projekt (raport nidus)")
+    ui::cmd_row("build [ścieżka]", "pełny build wszystkich celów (komputery + telefony)")
+    ui::cmd_row("clean [ścieżka]", "usuń build/ w projekcie")
+    ui::cmd_row("sync-base [--ref R]", "zsynchronizuj lokalną bazę HackerOS")
+    ui::cmd_row("targets [ścieżka]", "pokaż cele budowy projektu")
+    ui::cmd_row("devices", "lista profili telefonów")
+    ui::cmd_row("doctor [ścieżka]", "sprawdź narzędzia potrzebne do budowy")
+    ui::cmd_row("info [ścieżka]", "podsumowanie projektu")
+    ui::cmd_row("release-notes [ścieżka]", "wygeneruj notatki wydania z build/out")
+    ui::cmd_row("completions <shell>", "dopełnianie: bash | zsh | fish")
+    ui::cmd_row("selftest", "wbudowane testy")
+    ui::title("Etapy (pojedyncze kroki builda)")
+    ui::cmd_row("run-scripts [ścieżka]", "uruchom scripts/*.hl")
+    ui::cmd_row("stage [ścieżka]", "złóż nakładkę live-build (baza + branding + pakiety)")
+    ui::cmd_row("lb-config [ścieżka]", "lb config dla każdego celu")
+    ui::cmd_row("lb-build [ścieżka]", "lb build + artefakty (wymaga roota)")
+    ui::title("Opcje")
+    ui::flag_row("--target T", "filtr: pc | phone | pc:amd64 | phone:arm64:pinephone")
+    ui::flag_row("--arch A", "tylko ta architektura (amd64, arm64, armhf, i386)")
+    ui::flag_row("--suite S", "nadpisz [release] -> suite")
+    ui::flag_row("--ref R", "nadpisz [release] -> base-ref")
+    ui::flag_row("--iso-name N", "nadpisz [build] -> iso-name")
+    ui::flag_row("--no-base", "nie łącz z bazą HackerOS")
+    ui::flag_row("--strict", "ostrzeżenia walidacji = błędy")
+    ui::flag_row("--clean", "build: najpierw usuń build/")
+    ui::flag_row("--keep-going", "run-scripts: nie przerywaj po błędzie")
+    ui::flag_row("-n, --dry-run", "pokaż, co by się stało (bez lb/obrazów)")
+    ui::flag_row("-v, --verbose", "pokaż wykonywane polecenia")
+    ui::flag_row("--no-color", "bez kolorów")
+    ui::flag_row("-V, --version", "wersja")
+    ui::flag_row("-h, --help", "ta pomoc")
+    ui::blank()
+end
+
+;; ── wspólne ──────────────────────────────────────────────────────────
+
 struct LoadResult is
     ok:      bool
     project: project::Project
 end
 
-fn load_and_check(root: string) -> LoadResult is
-    let p = project::load(root)
-    let v = project::validate(p)
-    project::print_report(v)
+fn load_and_check(root: string, o: opts::Options) -> LoadResult is
+    let p: project::Project = project::load(root)
+    let mut v: project::ValidationResult = project::validate(p)
+    if o.strict is v = project::promote_warnings(v) end
+    diag::print_issues(p, v)
+    if project::is_ok(v) is
+        if project::warnings_count(v) == 0 is ui::ok("projekt jest poprawny") end
+    end
     return LoadResult { ok: project::is_ok(v), project: p }
 end
 
-pub fn print_help() is
-    write(version::banner())
-    write("Użycie: legendaryos-builder <komenda> [argumenty]")
-    write("")
-    write("  new <nazwa>          utwórz szkielet nowego projektu LegendaryOS")
-    write("  validate [ścieżka]   zwaliduj strukturę projektu (domyślnie: .)")
-    write("  build [ścieżka]      pełny build: stage + skrypty + lb config + lb build")
-    write("  clean [ścieżka]      usuń build/ w projekcie")
-    write("  sync-base [--ref R]  zsynchronizuj lokalną bazę HackerOS przez hgit")
-    write("")
-    write("  stage [ścieżka]        (etap) przygotuj nakładkę live-build")
-    write("  run-scripts [ścieżka]  (etap) uruchom scripts/*.hl")
-    write("  lb-config [ścieżka]    (etap) lb config")
-    write("  lb-build [ścieżka]     (etap) lb build")
-    write("")
-    write("  --version, -V        pokaż wersję")
-    write("  --help, -h           ta pomoc")
-end
-
-fn cmd_new(argv: [string]) is
-    if argv.len() < 3 is
-        write("Użycie: legendaryos-builder new <nazwa>")
-        return
+fn targets_or_fail(p: project::Project, o: opts::Options) -> [target::Target] is
+    let ts: [target::Target] = target::resolve_all(p, o, target::host_arch())
+    if array_len(ts) == 0 is
+        ui::fail("żaden cel nie pasuje do konfiguracji/filtrów (--target / --arch)")
     end
-    scaffold::create(argv[2])
+    return ts
 end
 
-fn cmd_validate(argv: [string]) is
-    let root = dir_or_default(argv, 2)
-    let p = project::load(root)
-    let v = project::validate(p)
-    project::print_report(v)
-    if !project::is_ok(v) is
-        write("")
-        write("Build przerwany -- napraw powyższe błędy i spróbuj ponownie.")
+;; ── komendy ──────────────────────────────────────────────────────────
+
+fn cmd_new(pr: Parsed) -> int is
+    if array_len(pr.args) < 1 is
+        ui::fail("użycie: legendaryos-builder new <nazwa> [--kind pc|phone|both] [--device ID]")
+        return 2
     end
+    if scaffold::create(pr.args[0], pr.opts) is return 0 end
+    return 1
 end
 
-fn cmd_stage(argv: [string]) -> bool is
-    let root = dir_or_default(argv, 2)
-    let loaded = load_and_check(root)
-    if !loaded.ok is return false end
-    return livebuild::stage(loaded.project)
+fn cmd_validate(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if loaded.ok is return 0 end
+    ui::blank()
+    ui::fail("walidacja nie powiodła się -- popraw błędy powyżej")
+    return 1
 end
 
-fn cmd_run_scripts(argv: [string]) -> bool is
-    let root = dir_or_default(argv, 2)
-    let results = scriptrunner::run_all(root + "/scripts")
-    return scriptrunner::all_ok(results)
+fn cmd_run_scripts(pr: Parsed) -> int is
+    let root: string = arg_or(pr, 0, ".")
+    let results: [scriptrunner::ScriptResult] = scriptrunner::run_all(root, pr.opts)
+    if scriptrunner::all_ok(results) is return 0 end
+    return 1
 end
 
-fn cmd_lb_config(argv: [string]) -> bool is
-    let root = dir_or_default(argv, 2)
-    let loaded = load_and_check(root)
-    if !loaded.ok is return false end
-    return livebuild::lb_config(loaded.project)
-end
-
-fn cmd_lb_build(argv: [string]) -> bool is
-    let root = dir_or_default(argv, 2)
-    let loaded = load_and_check(root)
-    if !loaded.ok is return false end
-    return livebuild::lb_build(loaded.project)
-end
-
-fn cmd_build(argv: [string]) is
-    let root = dir_or_default(argv, 2)
-    write(version::banner())
-
-    let loaded = load_and_check(root)
-    if !loaded.ok is
-        write("")
-        write("Build przerwany -- struktura projektu jest niepoprawna.")
-        return
-    end
-
-    let p = loaded.project
-    if !livebuild::stage(p) is return end
-
-    let results = scriptrunner::run_all(root + "/scripts")
-    if !scriptrunner::all_ok(results) is
-        write("Build przerwany -- skrypt scripts/*.hl zwrócił błąd.")
-        return
-    end
-
-    if !livebuild::lb_config(p) is return end
-    livebuild::lb_build(p)
-end
-
-fn cmd_clean(argv: [string]) is
-    let root = dir_or_default(argv, 2)
-    write("  → usuwam " + root + "/build")
-    __builtin_fs_rmdir_all(root + "/build")
-end
-
-fn cmd_sync_base(argv: [string]) is
-    let mut ref_name = "official"
-    let mut i = 2
-    while i < argv.len() is
-        if argv[i] == "--ref" && i + 1 < argv.len() is
-            ref_name = argv[i + 1]
-        end
+fn cmd_stage(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if !loaded.ok is return 1 end
+    let ts: [target::Target] = targets_or_fail(loaded.project, pr.opts)
+    if array_len(ts) == 0 is return 1 end
+    let mut i: int = 0
+    while i < array_len(ts) is
+        if !livebuild::stage(loaded.project, pr.opts, ts[i]) is return 1 end
         i += 1
     end
-    gitsync::bootstrap_mirror(version::upstream_url(), ref_name)
+    return 0
 end
 
-pub fn dispatch(argv: [string]) is
-    if argv.len() < 2 is
+fn cmd_lb_config(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if !loaded.ok is return 1 end
+    let ts: [target::Target] = targets_or_fail(loaded.project, pr.opts)
+    if array_len(ts) == 0 is return 1 end
+    let mut i: int = 0
+    while i < array_len(ts) is
+        if !livebuild::lb_config(loaded.project, pr.opts, ts[i]) is return 1 end
+        i += 1
+    end
+    return 0
+end
+
+fn cmd_lb_build(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if !loaded.ok is return 1 end
+    let ts: [target::Target] = targets_or_fail(loaded.project, pr.opts)
+    if array_len(ts) == 0 is return 1 end
+    let mut produced: [string] = []
+    let mut i: int = 0
+    while i < array_len(ts) is
+        if !livebuild::lb_build(loaded.project, pr.opts, ts[i]) is return 1 end
+        let made: [string] = livebuild::finish(loaded.project, pr.opts, ts[i])
+        if array_len(made) == 0 && !pr.opts.dry_run is return 1 end
+        produced = array_concat(produced, made)
+        i += 1
+    end
+    print_artifacts(loaded.project, produced)
+    return 0
+end
+
+fn print_artifacts(p: project::Project, produced: [string]) is
+    if array_len(produced) == 0 is return end
+    ui::title("Artefakty")
+    let out_dir: string = path_join(project::build_dir(p), "out")
+    let mut i: int = 0
+    while i < array_len(produced) is
+        let size: string = sh::capture("du -h " + sh::sq(path_join(out_dir, produced[i])) + " 2>/dev/null | cut -f1")
+        ui::kv(size, produced[i])
+        i += 1
+    end
+    ui::muted("katalog: " + out_dir)
+end
+
+fn cmd_build(pr: Parsed) -> int is
+    let root: string = arg_or(pr, 0, ".")
+    ui::plain(ui::banner(version::version()))
+    let loaded: LoadResult = load_and_check(root, pr.opts)
+    if !loaded.ok is
+        ui::blank()
+        ui::fail("build przerwany -- struktura projektu jest niepoprawna")
+        return 1
+    end
+    let p: project::Project = loaded.project
+    let o: opts::Options = pr.opts
+    let ts: [target::Target] = targets_or_fail(p, o)
+    if array_len(ts) == 0 is return 1 end
+    if o.clean_first is sh::rm_rf(project::build_dir(p)) end
+
+    ui::title("Plan")
+    let mut i: int = 0
+    while i < array_len(ts) is
+        ui::kv(ts[i].kind, target::label(ts[i]) + "  ->  " + str_join(ts[i].images, ", "))
+        i += 1
+    end
+
+    ui::title("Skrypty")
+    let results: [scriptrunner::ScriptResult] = scriptrunner::run_all(root, o)
+    if !scriptrunner::all_ok(results) is
+        ui::fail("build przerwany -- skrypt scripts/*.hl zwrócił błąd")
+        return 1
+    end
+
+    let mut produced: [string] = []
+    i = 0
+    while i < array_len(ts) is
+        ui::title("Cel " + to_string(i + 1) + "/" + to_string(array_len(ts)) + ": " + target::label(ts[i]))
+        if !livebuild::stage(p, o, ts[i]) is return 1 end
+        if !livebuild::lb_config(p, o, ts[i]) is return 1 end
+        if !livebuild::lb_build(p, o, ts[i]) is return 1 end
+        let made: [string] = livebuild::finish(p, o, ts[i])
+        if array_len(made) == 0 && !o.dry_run is return 1 end
+        produced = array_concat(produced, made)
+        i += 1
+    end
+
+    if !o.dry_run is
+        let base_dir: string = path_join(ts[0].work_dir, ".base")
+        let notes: string = release::write_notes(p, o, ts, produced, base_dir)
+        ui::ok("notatki wydania: " + notes)
+        if !o.keep_staging is
+            let mut k: int = 0
+            while k < array_len(ts) is
+                sh::rm_rf(path_join(ts[k].work_dir, ".staging"))
+                k += 1
+            end
+        end
+    end
+    print_artifacts(p, produced)
+    ui::blank()
+    ui::ok("gotowe")
+    return 0
+end
+
+fn cmd_clean(pr: Parsed) -> int is
+    let root: string = arg_or(pr, 0, ".")
+    if !fs_is_file(path_join(root, "config.hk")) is
+        ui::fail(root + " nie wygląda na projekt LegendaryOS (brak config.hk) -- nic nie usuwam")
+        return 1
+    end
+    let dir: string = path_join(root, "build")
+    ui::info("usuwam " + dir)
+    if pr.opts.dry_run is
+        ui::muted("[dry-run]")
+        return 0
+    end
+    sh::rm_rf(dir)
+    return 0
+end
+
+fn cmd_sync_base(pr: Parsed) -> int is
+    let root: string = arg_or(pr, 0, ".")
+    let p: project::Project = project::load(root)
+    let ref_name: string = project::base_ref(p, pr.opts)
+    let url: string = project::base_url(p)
+    if gitsync::bootstrap_mirror(url, ref_name, project::token(p)) is
+        ui::ok("lustro bazy gotowe: " + gitsync::mirror_dir() + " @ " + gitsync::head_info(gitsync::mirror_dir()))
+        return 0
+    end
+    return 1
+end
+
+fn cmd_targets(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if !loaded.ok is return 1 end
+    let ts: [target::Target] = target::resolve_all(loaded.project, pr.opts, target::host_arch())
+    ui::title("Cele (host: " + target::host_arch() + ")")
+    let mut i: int = 0
+    while i < array_len(ts) is
+        let t: target::Target = ts[i]
+        let mut extra: string = ""
+        if t.qemu_arch != "" is extra = "  [qemu: " + t.qemu_static + "]" end
+        ui::kv(t.kind, target::label(t) + "  ->  " + str_join(t.images, ", ") + extra)
+        i += 1
+    end
+    if array_len(ts) == 0 is ui::warn("brak celów") end
+    return 0
+end
+
+fn cmd_devices() -> int is
+    ui::title("Profile urządzeń")
+    let list: [devices::Device] = devices::all()
+    let mut i: int = 0
+    while i < array_len(list) is
+        ui::cmd_row(list[i].id, list[i].name + "  [" + list[i].arch + ", boot: " + list[i].boot + "]")
+        if list[i].notes != "" is ui::muted("    " + list[i].notes) end
+        i += 1
+    end
+    ui::blank()
+    ui::hint("użycie w config.hk:  -> targets => [phone:arm64:<id>]")
+    return 0
+end
+
+fn cmd_doctor(pr: Parsed) -> int is
+    let root: string = arg_or(pr, 0, ".")
+    let has_project: bool = fs_is_file(path_join(root, "config.hk"))
+    let p: project::Project = project::load(root)
+    let missing: int = doctor::run_checks(p, has_project, pr.opts)
+    ui::blank()
+    if missing == 0 is
+        ui::ok("wszystko gotowe do budowy")
+        return 0
+    end
+    ui::fail("brakuje wymagań: " + to_string(missing))
+    return 1
+end
+
+fn cmd_info(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if !loaded.ok is return 1 end
+    let p: project::Project = loaded.project
+    let o: opts::Options = pr.opts
+    ui::title(project::distro_name(p) + " " + project::proj_version(p) + " (" + project::tag(p) + ")")
+    ui::kv("projekt", project::name(p))
+    ui::kv("suite", project::suite(p, o))
+    ui::kv("baza", hkconf::get_or(p.config, "release", "base", "hackeros") + " @ " + project::base_ref(p, o))
+    ui::kv("iso-name", project::iso_name(p, o))
+    let ts: [target::Target] = target::resolve_all(p, o, target::host_arch())
+    let mut i: int = 0
+    while i < array_len(ts) is
+        ui::kv("cel", target::label(ts[i]) + "  (" + to_string(array_len(packages::package_names(p, ts[i]))) + " pakietów)")
+        i += 1
+    end
+    ui::kv("kolory", ui::level_name())
+    return 0
+end
+
+fn cmd_release_notes(pr: Parsed) -> int is
+    let loaded: LoadResult = load_and_check(arg_or(pr, 0, "."), pr.opts)
+    if !loaded.ok is return 1 end
+    let p: project::Project = loaded.project
+    let ts: [target::Target] = targets_or_fail(p, pr.opts)
+    if array_len(ts) == 0 is return 1 end
+    let out_dir: string = path_join(project::build_dir(p), "out")
+    let listing: string = sh::capture("ls -1 " + sh::sq(out_dir) + " 2>/dev/null | grep -v RELEASE-NOTES")
+    let mut produced: [string] = []
+    if listing != "" is produced = string_split(listing, "\n") end
+    let file: string = release::write_notes(p, pr.opts, ts, produced, path_join(ts[0].work_dir, ".base"))
+    ui::ok("zapisano " + file)
+    return 0
+end
+
+fn cmd_completions(pr: Parsed) -> int is
+    let sh_name: string = arg_or(pr, 0, "bash")
+    let out: string = completions::for_shell(sh_name)
+    if out == "" is
+        ui::fail("nieznana powłoka '" + sh_name + "' (bash | zsh | fish)")
+        return 2
+    end
+    write(out)
+    return 0
+end
+
+pub fn dispatch(argv: [string]) -> int is
+    let pr: Parsed = parse(argv)
+    ui::setup(pr.opts.no_color)
+    diag::setup(pr.opts.no_color)
+
+    if pr.bad != "" is
+        ui::fail(pr.bad)
+        ui::hint("legendaryos-builder --help")
+        return 2
+    end
+    let cmd: string = pr.cmd
+    if cmd == "" || cmd == "help" is
         print_help()
-        return
+        return 0
     end
-
-    let cmd = argv[1]
-
-    if cmd == "--help" || cmd == "-h" is print_help() return end
-    if cmd == "--version" || cmd == "-V" is
+    if cmd == "version" is
         write(version::name() + " " + version::version())
-        return
+        return 0
     end
 
-    if cmd == "new" is cmd_new(argv) return end
-    if cmd == "validate" is cmd_validate(argv) return end
-    if cmd == "build" is cmd_build(argv) return end
-    if cmd == "clean" is cmd_clean(argv) return end
-    if cmd == "sync-base" is cmd_sync_base(argv) return end
+    if cmd == "new" is return cmd_new(pr) end
+    if cmd == "validate" is return cmd_validate(pr) end
+    if cmd == "build" is return cmd_build(pr) end
+    if cmd == "clean" is return cmd_clean(pr) end
+    if cmd == "sync-base" is return cmd_sync_base(pr) end
+    if cmd == "targets" is return cmd_targets(pr) end
+    if cmd == "devices" is return cmd_devices() end
+    if cmd == "doctor" is return cmd_doctor(pr) end
+    if cmd == "info" is return cmd_info(pr) end
+    if cmd == "release-notes" is return cmd_release_notes(pr) end
+    if cmd == "completions" is return cmd_completions(pr) end
+    if cmd == "selftest" is return selftest::run() end
 
-    if cmd == "stage" is cmd_stage(argv) return end
-    if cmd == "run-scripts" is cmd_run_scripts(argv) return end
-    if cmd == "lb-config" is cmd_lb_config(argv) return end
-    if cmd == "lb-build" is cmd_lb_build(argv) return end
+    if cmd == "stage" is return cmd_stage(pr) end
+    if cmd == "run-scripts" is return cmd_run_scripts(pr) end
+    if cmd == "lb-config" is return cmd_lb_config(pr) end
+    if cmd == "lb-build" is return cmd_lb_build(pr) end
 
-    write("Nieznana komenda: " + cmd)
-    print_help()
+    ui::fail("nieznana komenda: " + cmd)
+    ui::hint("legendaryos-builder --help")
+    return 2
 end
