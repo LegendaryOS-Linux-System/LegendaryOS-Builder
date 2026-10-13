@@ -1,15 +1,35 @@
 [package]
 -> name        => legendaryos-builder
--> version     => 0.6
--> description => Narzędzie do budowy dystrybucji LegendaryOS (bazującej na HackerOS) — nakładka na live-build
--> author      => LegendaryOS Team
+-> version     => 0.6.0
+-> description => Narzędzie do budowy dystrybucji LegendaryOS (baza: HackerOS) dla komputerów i telefonów — nakładka na live-build
+-> authors     => ["LegendaryOS Team"]
 -> license     => MIT
+-> keywords     => ["live-build", "iso", "linux", "arm64", "mobile", "hackeros"]
+-> readme      => README.adoc
+-> lang        => h#
+
+[edition]
+-> edition   => 2026
+-> toolchain => 0.9
+
+[layout]
+-> src => src
 
 [build]
--> lang     => h#
--> entry    => src/main.h#
--> output   => build/legendaryos-builder
--> include  => src/
+-> link => static
 
-[deps]
--> git => newest
+[default-build]
+-> profile => release
+-> emit    => bin
+
+[dependencies]
+-> colors => newest
+-> nidus  => newest
+
+[commands]
+-> check
+--> run => h# check src/main.h#
+--> description => Sprawdź typy całego buildera
+-> selftest
+--> run => bit run -- selftest
+--> description => Uruchom wbudowane testy (legendaryos-builder selftest)
