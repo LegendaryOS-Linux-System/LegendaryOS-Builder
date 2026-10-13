@@ -3,8 +3,6 @@ mod devices
 mod sh
 mod ui
 
-use "std -> base64" from "b64"
-
 ;; `legendaryos-builder new <nazwa> [--kind pc|phone|both] [--device ID]`
 
 pub fn placeholder_png_b64() -> string is
@@ -17,7 +15,8 @@ pub fn placeholder_jpg_b64() -> string is
 end
 
 fn write_placeholder(path_out: string, b64_data: string) is
-    fs_write_bytes(path_out, b64::decode_bytes(b64_data))
+    ;; backend LLVM (--release) nie wspiera base64::decode_bytes -> systemowe base64
+    sh::run("printf '%s' " + sh::sq(b64_data) + " | base64 -d > " + sh::sq(path_out))
 end
 
 ;; Lista celów dla szablonu config.hk.
