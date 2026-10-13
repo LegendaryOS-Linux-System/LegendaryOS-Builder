@@ -1,0 +1,72 @@
+mod project
+mod hkconf
+mod opts
+mod sh
+mod text
+
+;; Tożsamość systemu generowana z config.hk: os-release, lsb-release,
+;; issue, motd, hostname. Pliki z files/ projektu NADPISUJĄ wygenerowane
+;; (kopiowane później), więc zawsze można je ręcznie zastąpić.
+;; Wyłączenie: [system] -> generate-identity => false
+
+fn q(s: string) -> string is
+    return "\"" + string_replace(s, "\"", "\\\"") + "\""
+end
+
+pub fn os_release(p: project::Project, o: opts::Options) -> string is
+    let nm: string = project::distro_name(p)
+    let ver: string = project::proj_version(p)
+    let tg: string = project::tag(p)
+    let home: string = hkconf::get_or(p.config, "branding", "home-url", "https://github.com/LegendaryOS")
+    let sup: string = hkconf::get_or(p.config, "branding", "support-url", home)
+    let bug: string = hkconf::get_or(p.config, "branding", "bug-url", sup)
+    let mut out: string = ""
+    out = out + "PRETTY_NAME=" + q(nm + " " + ver + " (" + tg + ")") + "\n"
+    out = out + "NAME=" + q(nm) + "\n"
+    out = out + "VERSION_ID=" + q(ver) + "\n"
+    out = out + "VERSION=" + q(ver + " (" + tg + ")") + "\n"
+    out = out + "VERSION_CODENAME=" + project::suite(p, o) + "\n"
+    out = out + "ID=" + text::slug(nm) + "\n"
+    out = out + "ID_LIKE=debian\n"
+    out = out + "VARIANT_ID=" + text::slug(tg) + "\n"
+    out = out + "HOME_URL=" + q(home) + "\n"
+    out = out + "SUPPORT_URL=" + q(sup) + "\n"
+    out = out + "BUG_REPORT_URL=" + q(bug) + "\n"
+    return out
+end
+
+pub fn lsb_release(p: project::Project, o: opts::Options) -> string is
+    let mut out: string = ""
+    out = out + "DISTRIB_ID=" + project::distro_name(p) + "\n"
+    out = out + "DISTRIB_RELEASE=" + project::proj_version(p) + "\n"
+    out = out + "DISTRIB_CODENAME=" + project::suite(p, o) + "\n"
+    out = out + "DISTRIB_DESCRIPTION=" + q(project::distro_name(p) + " " + project::proj_version(p)) + "\n"
+    return out
+end
+
+;; `cfg_dir` = katalog "config" w stylu live-build. Zwraca liczbę plików.
+pub fn stage(p: project::Project, o: opts::Options, cfg_dir: string) -> int is
+    if !hkconf::get_bool(p.config, "system", "generate-identity", true) is return 0 end
+    let root: string = path_join(cfg_dir, "includes.chroot_after_packages")
+    let nm: string = project::distro_name(p)
+    let mut n: int = 0
+
+    sh::write_text(path_join(root, "usr/lib/os-release"), os_release(p, o))
+    sh::write_text(path_join(root, "etc/lsb-release"), lsb_release(p, o))
+    sh::write_text(path_join(root, "etc/legendaryos-release"), nm + " " + project::proj_version(p) + " (" + project::tag(p) + ")\n")
+    sh::write_text(path_join(root, "etc/issue"), nm + " " + project::proj_version(p) + " \\n \\l\n\n")
+    sh::write_text(path_join(root, "etc/issue.net"), nm + " " + project::proj_version(p) + "\n")
+    n = 5
+
+    let motd: string = hkconf::get(p.config, "system", "motd")
+    if motd != "" is
+        sh::write_text(path_join(root, "etc/motd"), string_replace_all(motd, "\\n", "\n") + "\n")
+        n += 1
+    end
+    let host: string = hkconf::get(p.config, "system", "hostname")
+    if host != "" is
+        sh::write_text(path_join(root, "etc/hostname"), host + "\n")
+        n += 1
+    end
+    return n
+end
