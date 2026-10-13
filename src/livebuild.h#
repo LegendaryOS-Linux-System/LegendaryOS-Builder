@@ -1,115 +1,247 @@
-mod hkconf
 mod project
+mod hkconf
+mod opts
+mod target
+mod devices
+mod sh
+mod ui
 mod branding
+mod identity
+mod packages
+mod gitsync
+mod image
+mod text
 
-use "std -> fs"      from "fs"
-use "std -> path"    from "path"
-use "std -> process" from "proc"
+;; Etapy budowy jednego celu (komputer albo telefon, jedna architektura):
+;;   stage -> lb-config -> lb-build -> finish
+;; Każdy cel ma własny katalog roboczy build/lb/<arch>-<kind>/, więc
+;; `arch => [amd64, arm64]` buduje komputery i telefony bez kolizji.
 
-fn staging_dir(root: string) -> string is
-    return path::join(root, "build/.staging")
+fn staging_dir(t: target::Target) -> string is
+    return path_join(t.work_dir, ".staging")
 end
 
-fn config_dir(root: string) -> string is
-    return path::join(root, "build/config")
+fn base_dir(t: target::Target) -> string is
+    return path_join(t.work_dir, ".base")
 end
 
-;; files/ w projekcie to nakładka "after packages" -- kopiowana 1:1 pod
-;; includes.chroot_after_packages/, na tych samych zasadach co
-;; branding.h#'s `stage`.
-fn stage_files_tree(files_dir: string, staging: string) is
-    if !fs::is_dir(files_dir) is return end
-    let dest = path::join(staging, "includes.chroot_after_packages")
-    fs::mkdir(dest)
-    let entries = fs::walk(files_dir)
-    let mut i = 0
-    while i < entries.len() is
-        if fs::is_file(entries[i]) is
-            let rel = entries[i][files_dir.len() + 1..entries[i].len()]
-            let dst = path::join(dest, rel)
-            fs::mkdir(path::parent(dst))
-            fs::copy(entries[i], dst)
+;; Nazwa bazowa artefaktów: <iso-name>-<tag>-<arch>[-<urządzenie>]
+pub fn out_name(p: project::Project, o: opts::Options, t: target::Target) -> string is
+    let mut n: string = project::iso_name(p, o) + "-" + project::tag(p) + "-" + t.arch
+    if t.kind == "phone" is n = n + "-" + t.device end
+    return n
+end
+
+fn quote_args(args: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(args) is
+        if i > 0 is out = out + " " end
+        out = out + sh::sq(args[i])
+        i += 1
+    end
+    return out
+end
+
+;; Argumenty `lb config` -- czysta funkcja (testowana w selftest).
+pub fn lb_args(p: project::Project, o: opts::Options, t: target::Target) -> [string] is
+    let label_raw: string = hkconf::get_or(p.config, "build", "volume-label", project::distro_name(p))
+    let mut label: string = label_raw
+    if string_len(label) > 32 is label = string_slice(label, 0, 32) end
+
+    let mut a: [string] = [
+        "config",
+        "--distribution", project::suite(p, o),
+        "--architectures", t.arch,
+        "--system", t.system,
+        "--binary-images", t.binary_images,
+        "--archive-areas", "main contrib non-free non-free-firmware",
+        "--linux-flavours", t.flavour,
+        "--image-name", project::iso_name(p, o),
+        "--iso-volume", label,
+        "--iso-application", project::distro_name(p),
+        "--iso-publisher", hkconf::get_or(p.config, "build", "publisher", project::distro_name(p)),
+        "--apt-recommends", if hkconf::get_bool(p.config, "packages", "recommends", true) then "true" else "false",
+        "--firmware-chroot", if hkconf::get_bool(p.config, "build", "firmware", true) then "true" else "false",
+    ]
+    if t.bootloaders != "" is
+        a.push("--bootloaders")
+        a.push(t.bootloaders)
+    end
+    if t.kind == "pc" is
+        a.push("--bootappend-live")
+        a.push(hkconf::get_or(p.config, "build", "bootappend", "boot=live components quiet splash"))
+    end
+    if t.qemu_arch != "" is
+        a.push("--bootstrap-qemu-arch")
+        a.push(t.qemu_arch)
+        a.push("--bootstrap-qemu-static")
+        a.push(t.qemu_static)
+    end
+    return a
+end
+
+fn ex(o: opts::Options, dir: string, cmd: string) -> int is
+    if o.verbose is ui::debug("(" + dir + ") " + cmd) end
+    if o.dry_run is
+        ui::muted("[dry-run] " + cmd)
+        return 0
+    end
+    return sh::in_dir(dir, cmd)
+end
+
+;; Lustro + migawka bazy HackerOS i import wskazanych elementów do `staging`.
+fn prepare_base(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if o.no_base is
+        ui::muted("baza HackerOS: pominięta (--no-base)")
+        return true
+    end
+    if o.dry_run is
+        ui::muted("[dry-run] baza HackerOS: lustro + migawka + import")
+        return true
+    end
+    if !gitsync::mirror_exists() is
+        ui::info("brak lokalnego lustra bazy -- pobieram (sync-base)")
+        if !gitsync::bootstrap_mirror(project::base_url(p), project::base_ref(p, o), project::token(p)) is
+            ui::fail("nie udało się pobrać bazy HackerOS (użyj --no-base, aby zbudować bez niej)")
+            return false
+        end
+    end
+    if !gitsync::snapshot_base(base_dir(t)) is return false end
+    let mut what: [string] = hkconf::get_list(p.config, "base", "import")
+    if array_len(what) == 0 is what = ["package-lists"] end
+    let n: int = gitsync::import_base(base_dir(t), staging_dir(t), what, hkconf::get(p.config, "base", "helper"))
+    let info: string = gitsync::head_info(base_dir(t))
+    sh::write_text(path_join(staging_dir(t), "base.info"), info + "\n")
+    ui::ok("baza HackerOS @ " + info + " -- zaimportowano " + to_string(n) + " plików (" + str_join(what, ", ") + ")")
+    return true
+end
+
+;; Etap 1: złóż nakładkę (baza + branding + tożsamość + pakiety + files/).
+pub fn stage(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    let st: string = staging_dir(t)
+    sh::rm_rf(st)
+    sh::mkdir_p(st)
+
+    ;; kolejność ma znaczenie: późniejsze nadpisują wcześniejsze
+    if !prepare_base(p, o, t) is return false end
+    let nb: int = branding::stage(p, t, st)
+    let ni: int = identity::stage(p, o, st)
+    let np: int = packages::stage(p, t, st)
+    let files: string = path_join(p.root, "files")
+    if fs_is_dir(files) is
+        sh::copy_tree(files, path_join(st, "includes.chroot_after_packages"))
+    end
+    ui::ok("nakładka [" + target::label(t) + "]: branding " + to_string(nb) + ", tożsamość " + to_string(ni) +
+           ", pakiety " + to_string(np) + " -> " + st)
+    return true
+end
+
+;; Etap 2: `lb config` + wczytanie nakładki do config/.
+pub fn lb_config(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if !sh::tool_exists("lb") && !o.dry_run is
+        ui::fail("nie znaleziono `lb` (live-build) w PATH -- zainstaluj pakiet `live-build`")
+        return false
+    end
+    if target::needs_qemu(target::host_arch(), t.arch) && !o.dry_run is
+        if !fs_is_file(t.qemu_static) is
+            ui::fail("budowa " + t.arch + " na hoście " + target::host_arch() + " wymaga " + t.qemu_static +
+                     " (pakiety qemu-user-static + binfmt-support)")
+            return false
+        end
+    end
+    sh::mkdir_p(t.work_dir)
+    ex(o, t.work_dir, "rm -rf config auto chroot binary .build")
+    let rc: int = ex(o, t.work_dir, "lb " + quote_args(lb_args(p, o, t)))
+    if rc != 0 is
+        ui::fail("lb config zakończył się błędem (kod " + to_string(rc) + ")")
+        return false
+    end
+    if !o.dry_run is
+        if !sh::copy_tree(staging_dir(t), path_join(t.work_dir, "config")) is
+            ui::fail("nie udało się skopiować nakładki do config/")
+            return false
+        end
+    end
+    ui::ok("lb config [" + target::label(t) + "]")
+    return true
+end
+
+;; Etap 3: `lb build` (wymaga roota). Log w <work>/build.log.
+pub fn lb_build(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if !o.dry_run is
+        if !sh::tool_exists("lb") is
+            ui::fail("nie znaleziono `lb` (live-build)")
+            return false
+        end
+        if !sh::is_root() is
+            ui::fail("`lb build` wymaga uprawnień roota -- uruchom: sudo legendaryos-builder build")
+            return false
+        end
+        let free: int = sh::free_mb(t.work_dir)
+        if free >= 0 && free < 6000 is
+            ui::warn("mało miejsca na dysku: " + to_string(free) + " MiB wolnych (zalecane >= 6000)")
+        end
+    end
+    ui::info("lb build [" + target::label(t) + "] -- to może potrwać długo (log: " + path_join(t.work_dir, "build.log") + ")")
+    let rc_file: string = path_join(t.work_dir, ".lb-rc")
+    sh::rm_rf(rc_file)
+    ex(o, t.work_dir, "{{ lb build 2>&1; echo $? > .lb-rc; }} | tee build.log")
+    if o.dry_run is return true end
+    let mut rc: int = 1
+    if fs_is_file(rc_file) is rc = conv_str_to_int(string_trim(fs_read(rc_file))) end
+    if rc != 0 is
+        ui::fail("lb build zakończył się błędem (kod " + to_string(rc) + ") -- zobacz " + path_join(t.work_dir, "build.log"))
+        return false
+    end
+    return true
+end
+
+fn find_iso(t: target::Target) -> string is
+    return sh::capture("ls -1 " + sh::sq(t.work_dir) + "/*.iso 2>/dev/null | head -1")
+end
+
+;; Etap 4: zbierz artefakty do build/out/ pod docelowymi nazwami + sumy SHA-256.
+;; Zwraca listę nazw plików wynikowych.
+pub fn finish(p: project::Project, o: opts::Options, t: target::Target) -> [string] is
+    let name: string = out_name(p, o, t)
+    let mut produced: [string] = []
+    sh::mkdir_p(t.out_dir)
+    let dev: devices::Device = devices::find(t.device)
+
+    let mut i: int = 0
+    while i < array_len(t.images) is
+        let kind: string = t.images[i]
+        if kind == "iso" is
+            let iso: string = find_iso(t)
+            if iso == "" && !o.dry_run is
+                ui::fail("nie znaleziono wygenerowanego ISO w " + t.work_dir)
+                return []
+            end
+            if !o.dry_run is
+                sh::run("mv -f " + sh::sq(iso) + " " + sh::sq(path_join(t.out_dir, name + ".iso")))
+            end
+            produced.push(name + ".iso")
+        end
+        if kind == "rootfs-tar" is
+            if !image::make_rootfs_tar(t, o, name) is return [] end
+            produced.push(name + ".rootfs.tar.xz")
+        end
+        if kind == "raw-img" is
+            if !image::make_raw_img(p, t, o, dev, name) is return [] end
+            produced.push(name + ".img.xz")
+        end
+        if kind == "android-img" is
+            if !image::make_android(p, t, o, dev, name) is return [] end
+            produced.push(name + ".boot.img")
+            produced.push(name + ".rootfs.img")
         end
         i += 1
     end
-end
 
-;; Minimalna lista pakietów -- config.hk może (opcjonalnie) wymieniać
-;; dodatkowe pakiety w sekcji [packages], klucz po kluczu, wartość
-;; ignorowana (klucz = nazwa pakietu). To celowo prosty, jednopoziomowy
-;; format -- coś rozbudowanego (zależności, warunki per-edycja) należy
-;; już do package-lists/*.list.chroot ręcznie utrzymywanych w projekcie,
-;; tak jak w HackerOS-main/helpers/*/package-lists/.
-fn write_package_list(hk: hkconf::HkFile, config_root: string) is
-    let names = ["calamares", "calamares-settings-debian", "plymouth", "grub-pc", "grub-efi-amd64"]
-    let mut out = "# wygenerowane przez legendaryos-builder z config.hk [project]\n"
-    let mut i = 0
-    while i < names.len() is
-        out = out + names[i] + "\n"
-        i += 1
+    if !o.dry_run && array_len(produced) > 0 is
+        sh::in_dir(t.out_dir, "sha256sum " + str_join(produced, " ") + " > " + sh::sq(name + ".SHA256SUMS"))
+        produced.push(name + ".SHA256SUMS")
     end
-    let dest = path::join(config_root, "package-lists")
-    fs::mkdir(dest)
-    fs::write(path::join(dest, "legendaryos-base.list.chroot"), out)
-end
-
-;; Etap 1: przygotuj katalog config/ (branding + files + package-lists),
-;; zgodny z layoutem, którego oczekuje `lb config`/`lb build`.
-pub fn stage(p: project::Project) -> bool is
-    let staging = staging_dir(p.root)
-    if fs::exists(staging) is fs::rmdir_all(staging) end
-    fs::mkdir(staging)
-
-    branding::stage(path::join(p.root, "branding"), staging)
-    stage_files_tree(path::join(p.root, "files"), staging)
-    write_package_list(p.config, staging)
-
-    write("  \x1b[32m✔\x1b[0m nakładka live-build przygotowana w " + staging)
-    return true
-end
-
-;; Etap 2: `lb config` -- ustawia dystrybucję bazową (Debian suite z
-;; [release] -> suite w config.hk), architekturę i miejsce, z którego
-;; live-build ma wziąć naszą nakładkę.
-pub fn lb_config(p: project::Project) -> bool is
-    if proc::which("lb") == "" is
-        write("  \x1b[31m✘\x1b[0m nie znaleziono `lb` (live-build) w PATH -- " +
-              "zainstaluj pakiet `live-build`")
-        return false
-    end
-
-    let suite = hkconf::get_or(p.config, "release", "suite", "trixie")
-    let arch  = hkconf::get_or(p.config, "project", "arch", "amd64")
-    let cfg   = config_dir(p.root)
-    fs::mkdir(cfg)
-
-    let args = [
-        "config",
-        "--distribution", suite,
-        "--architectures", arch,
-        "--binary-images", "iso-hybrid",
-    ]
-    proc::run_args("lb", args)
-    fs::rmdir_all(path::join(cfg, "includes.chroot_after_packages"))
-    fs::copy(
-        path::join(staging_dir(p.root), "includes.chroot_after_packages"),
-        path::join(cfg, "includes.chroot_after_packages"),
-    )
-    fs::copy(
-        path::join(staging_dir(p.root), "package-lists"),
-        path::join(cfg, "package-lists"),
-    )
-    return true
-end
-
-;; Etap 3: `lb build` -- ISO trafia do build/<nazwa>.iso.
-pub fn lb_build(p: project::Project) -> bool is
-    if proc::which("lb") == "" is return false end
-    write("  → lb build (to może potrwać długo)...")
-    proc::run("cd " + config_dir(p.root) + " && lb build")
-
-    let iso_name = hkconf::get_or(p.config, "build", "iso-name",
-                                   hkconf::get_or(p.config, "project", "name", "legendaryos"))
-    write("  \x1b[32m✔\x1b[0m build zakończony -- szukaj " + iso_name + "*.iso w " + config_dir(p.root))
-    return true
+    return produced
 end
