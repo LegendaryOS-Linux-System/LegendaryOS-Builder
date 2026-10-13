@@ -1,0 +1,152 @@
+mod hkconf
+mod text
+mod devices
+mod target
+mod project
+mod opts
+mod packages
+mod livebuild
+mod identity
+mod branding
+mod image
+mod scriptrunner
+mod completions
+mod version
+mod ui
+
+;; Wbudowane testy (`legendaryos-builder selftest`). Sprawdzają czyste
+;; funkcje -- bez sieci, live-build ani roota. Kod wyjścia != 0 = porażka.
+
+struct Counter is
+    pass: int
+    fail: int
+end
+
+fn check(c: Counter, name: string, cond: bool) -> Counter is
+    if cond is
+        return Counter { pass: c.pass + 1, fail: c.fail }
+    end
+    ui::fail("FAIL: " + name)
+    return Counter { pass: c.pass, fail: c.fail + 1 }
+end
+
+fn sample_project(cfg: string) -> project::Project is
+    return project::Project {
+        root: "/tmp/lo-selftest",
+        config: hkconf::parse_text(cfg, "config.hk"),
+        user: hkconf::parse_text("[account]\n-> name => org\n", "user.hk"),
+    }
+end
+
+fn count_msgs(v: project::ValidationResult, code: string) -> int is
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < array_len(v.issues) is
+        if v.issues[i].code == code is n += 1 end
+        i += 1
+    end
+    return n
+end
+
+fn first_off(v: project::ValidationResult, code: string) -> int is
+    let mut i: int = 0
+    while i < array_len(v.issues) is
+        if v.issues[i].code == code is return v.issues[i].off end
+        i += 1
+    end
+    return -1
+end
+
+pub fn run() -> int is
+    let mut c: Counter = Counter { pass: 0, fail: 0 }
+    let o: opts::Options = opts::defaults()
+
+    ;; ── parser .hk ──
+    let hk: hkconf::HkFile = hkconf::parse_text("[a]\n-> x => 1 ;; k\n-> u => \"http://h;;p\"\n-> l => [p, \"q r\", s]\n-> m\n--> sub => 5\n[b\nzle\n", "t")
+    c = check(c, "hk: wartość", hkconf::get(hk, "a", "x") == "1")
+    c = check(c, "hk: ;; w cudzysłowie", hkconf::get(hk, "a", "u") == "http://h;;p")
+    c = check(c, "hk: lista", array_len(hkconf::get_list(hk, "a", "l")) == 3)
+    c = check(c, "hk: pod-klucz", hkconf::get(hk, "a", "m.sub") == "5")
+    c = check(c, "hk: błędy składni", array_len(hk.perr_msg) == 2)
+    let loc: [int] = hkconf::locate_value(hk, "a", "x")
+    c = check(c, "hk: pozycja wartości", array_len(loc) == 2 && string_slice(hk.text, loc[0], loc[0] + loc[1]) == "1")
+
+    ;; ── tekst ──
+    c = check(c, "text: levenshtein", text::distance("kitten", "sitting") == 3)
+    c = check(c, "text: suggest", text::suggest("amd46", ["amd64", "arm64"]) == "amd64")
+    c = check(c, "text: suggest brak", text::suggest("zzzzzz", ["amd64"]) == "")
+    c = check(c, "text: hex", text::parse_hex("#6236B0")[0] == 98)
+    c = check(c, "text: frac", text::frac(255) == "1.000" && text::frac(0) == "0.000")
+
+    ;; ── cele: komputer + telefon ──
+    c = check(c, "spec pc", array_len(devices::parse_spec("pc:amd64")) == 3)
+    c = check(c, "spec phone", devices::parse_spec("phone:arm64:pinephone")[2] == "pinephone")
+    c = check(c, "spec zły", array_len(devices::parse_spec("phone:arm64")) == 0)
+    c = check(c, "device pinephone", devices::find("pinephone").boot == "u-boot")
+    c = check(c, "device nieznane", devices::find("xyz").id == "")
+    c = check(c, "msdos dla sunxi", image::needs_msdos(devices::find("pinephone")))
+    c = check(c, "gpt dla rockchip", !image::needs_msdos(devices::find("pinephone-pro")))
+    c = check(c, "qemu amd64->arm64", target::needs_qemu("amd64", "arm64"))
+    c = check(c, "bez qemu natywnie", !target::needs_qemu("arm64", "arm64"))
+
+    let p: project::Project = sample_project("[project]\n-> name => Test\n-> targets => [pc:amd64, pc:arm64, phone:arm64:pinephone]\n-> tag => beta\n[packages]\n-> include => [vim]\n-> exclude => [os-prober]\n")
+    let ts: [target::Target] = target::resolve_all(p, o, "amd64")
+    c = check(c, "3 cele", array_len(ts) == 3)
+    c = check(c, "pc: iso", ts[0].images[0] == "iso" && ts[0].binary_images == "iso-hybrid")
+    c = check(c, "pc arm64: qemu z amd64", ts[1].qemu_arch == "arm64" && ts[1].qemu_static == "/usr/bin/qemu-aarch64-static")
+    c = check(c, "phone: raw-img + rootfs-tar", array_contains(ts[2].images, "raw-img") && array_contains(ts[2].images, "rootfs-tar"))
+    c = check(c, "phone: system normal", ts[2].system == "normal" && ts[2].binary_images == "tar")
+    c = check(c, "osobne katalogi robocze", ts[0].work_dir != ts[1].work_dir && ts[1].work_dir != ts[2].work_dir)
+
+    let mut o2: opts::Options = opts::defaults()
+    o2.target = "phone"
+    c = check(c, "filtr --target phone", array_len(target::resolve_all(p, o2, "amd64")) == 1)
+    let mut o3: opts::Options = opts::defaults()
+    o3.arch = "arm64"
+    c = check(c, "filtr --arch arm64", array_len(target::resolve_all(p, o3, "amd64")) == 2)
+
+    ;; ── pakiety ──
+    let pk_pc: [string] = packages::package_names(p, ts[0])
+    let pk_ph: [string] = packages::package_names(p, ts[2])
+    c = check(c, "pakiety pc: calamares", array_contains(pk_pc, "calamares"))
+    c = check(c, "pakiety pc: include", array_contains(pk_pc, "vim"))
+    c = check(c, "pakiety pc: exclude", !array_contains(pk_pc, "os-prober"))
+    c = check(c, "pakiety phone: phosh", array_contains(pk_ph, "phosh"))
+    c = check(c, "pakiety phone: u-boot", array_contains(pk_ph, "u-boot-sunxi"))
+    c = check(c, "pakiety phone: bez calamares", !array_contains(pk_ph, "calamares"))
+    c = check(c, "pakiety arm64 pc: grub-efi-arm64", array_contains(packages::package_names(p, ts[1]), "grub-efi-arm64-bin"))
+
+    ;; ── lb config ──
+    let args_pc: [string] = livebuild::lb_args(p, o, ts[0])
+    let args_ph: [string] = livebuild::lb_args(p, o, ts[2])
+    let args_arm: [string] = livebuild::lb_args(p, o, ts[1])
+    c = check(c, "lb pc: iso-hybrid", array_contains(args_pc, "iso-hybrid") && array_contains(args_pc, "--bootappend-live"))
+    c = check(c, "lb phone: tar bez bootloadera", array_contains(args_ph, "tar") && !array_contains(args_ph, "--bootloaders"))
+    c = check(c, "lb arm64: qemu", array_contains(args_arm, "--bootstrap-qemu-arch"))
+    c = check(c, "lb: out_name", livebuild::out_name(p, o, ts[2]) == "Test-beta-arm64-pinephone")
+
+    ;; ── tożsamość / branding ──
+    c = check(c, "os-release ID", string_find(identity::os_release(p, o), "ID=test") >= 0)
+    c = check(c, "plymouth kolor", string_find(branding::plymouth_script(p), "SetBackgroundTopColor(0.070") >= 0)
+    c = check(c, "extlinux", string_find(image::extlinux_conf(p, devices::find("pinephone"), "6.1-arm64"), "fdtdir /usr/lib/linux-image-6.1-arm64/") >= 0)
+
+    ;; ── walidacja ──
+    let bad: project::Project = sample_project("[project]\n-> name => X\n-> targets => [phone:arm64:pinephne, pc:amd46]\n[bulid]\n-> mode => live-build\n")
+    let v: project::ValidationResult = project::validate(bad)
+    c = check(c, "walidacja: literówka urządzenia", count_msgs(v, "config::device") == 1)
+    c = check(c, "walidacja: zła arch", count_msgs(v, "config::targets") == 1)
+    c = check(c, "walidacja: nieznana sekcja", count_msgs(v, "config::unknown_section") == 1)
+    c = check(c, "walidacja: błąd ma pozycję", first_off(v, "config::device") >= 0)
+
+    ;; ── skrypty i completions ──
+    c = check(c, "completions: bash", string_find(completions::bash(), "complete -F") >= 0)
+    c = check(c, "completions: urządzenia", string_find(completions::bash(), "pinephone") >= 0)
+
+    ui::blank()
+    if c.fail == 0 is
+        ui::ok("selftest: " + to_string(c.pass) + " testów OK")
+        return 0
+    end
+    ui::fail("selftest: " + to_string(c.fail) + " z " + to_string(c.pass + c.fail) + " testów NIE przeszło")
+    return 1
+end
