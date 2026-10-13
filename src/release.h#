@@ -1,0 +1,56 @@
+mod project
+mod hkconf
+mod opts
+mod target
+mod sh
+mod ui
+mod gitsync
+
+;; Notatki wydania: skąd się wziął obraz (baza HackerOS @ commit), co
+;; powstało i jakie są sumy kontrolne.
+
+pub fn notes_text(p: project::Project, o: opts::Options, targets: [target::Target],
+                  produced: [string], base_info: string, base_log: [string]) -> string is
+    let mut s: string = "# " + project::distro_name(p) + " " + project::proj_version(p) + " (" + project::tag(p) + ")\n\n"
+    s = s + "- Budowa: legendaryos-builder\n"
+    s = s + "- Debian suite: " + project::suite(p, o) + "\n"
+    let mut labels: [string] = []
+    let mut i: int = 0
+    while i < array_len(targets) is
+        labels.push(target::label(targets[i]))
+        i += 1
+    end
+    s = s + "- Cele: " + str_join(labels, "; ") + "\n"
+    if base_info != "" is
+        s = s + "- Baza HackerOS: " + project::base_ref(p, o) + " @ " + base_info + "\n"
+    end
+    s = s + "\n## Artefakty\n\n"
+    i = 0
+    while i < array_len(produced) is
+        s = s + "- " + produced[i] + "\n"
+        i += 1
+    end
+    if array_len(base_log) > 0 is
+        s = s + "\n## Ostatnie zmiany w bazie HackerOS\n\n"
+        i = 0
+        while i < array_len(base_log) is
+            s = s + "- " + base_log[i] + "\n"
+            i += 1
+        end
+    end
+    return s
+end
+
+pub fn write_notes(p: project::Project, o: opts::Options, targets: [target::Target],
+                   produced: [string], base_dir: string) -> string is
+    let out_dir: string = path_join(project::build_dir(p), "out")
+    let mut info: string = ""
+    let mut log: [string] = []
+    if !o.no_base && fs_is_dir(base_dir) is
+        info = gitsync::head_info(base_dir)
+        log = gitsync::base_log(base_dir, 10)
+    end
+    let file: string = path_join(out_dir, project::iso_name(p, o) + "-" + project::tag(p) + "-RELEASE-NOTES.md")
+    sh::write_text(file, notes_text(p, o, targets, produced, info, log))
+    return file
+end
