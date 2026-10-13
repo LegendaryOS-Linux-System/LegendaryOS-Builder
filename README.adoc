@@ -3,171 +3,175 @@
 :toclevels: 2
 
 Narzędzie do budowy dystrybucji *LegendaryOS* — Linuksa bazującego na
-https://github.com/HackerOS-Linux-System[HackerOS], z własnym
-logotypem/brandingiem, ale tą samą filozofią narzędziową: konfiguracja
-w formacie `.hk`, hooki w *Hacker Lang* (`.hl`), a pod spodem zwykły
-Debianowy `live-build` — LegendaryOS-Builder jest jego **nakładką**
-(wrapperem), nie zamiennikiem.
+https://github.com/HackerOS-Linux-System[HackerOS] — dla *komputerów*
+(amd64, arm64) i *telefonów* (arm64). Własny branding, ta sama filozofia
+narzędziowa: konfiguracja w `.hk`, hooki w *Hacker Lang* (`.hl`), a pod
+spodem zwykły Debianowy `live-build` — LegendaryOS-Builder jest jego
+*nakładką*, nie zamiennikiem.
 
-Napisane w *H#* (język ekosystemu HackerOS) i budowane przez `bytes`
-(H# Package Manager). Korzysta z biblioteki
-https://github.com/HackerOS-Linux-System/git[`git`] (hgit) do wszystkich
-operacji na obiektach Gita używanych do wersjonowania lokalnej kopii
-bazy HackerOS.
+Napisane w *H#*, budowane i zarządzane przez
+https://github.com/bit-io/bit[`bit`]. Używa bibliotek z bit.io:
 
-== Relacja z HackerOS
+* `colors` — kolorowy, spójny interfejs CLI (`use "bit -> colors"`),
+* `nidus` — czytelne raporty błędów `config.hk` z podświetlonym fragmentem
+  pliku (`use "bit -> nidus" from "nidus"`).
 
-LegendaryOS to w praktyce HackerOS z innym logotypem/brandingiem i
-własnym zestawem edycji/hooków — nie forek kodu HackerOS, tylko warstwa
-budowana *na* nim. `legendaryos-builder sync-base` utrzymuje lokalną,
-wersjonowaną kopię drzewa `HackerOS-Linux-System/HackerOS` (gałąź z
-`config.hk` → `[release] -> base-ref`, domyślnie `official`), a
-`legendaryos-builder build` łączy tę bazę z brandingiem/hookami/plikami
-Twojego projektu w jedną nakładkę `live-build`.
+== Co potrafi
 
-NOTE: `hgit` (biblioteka `git` tego ekosystemu) celowo **nie ma
-transportu sieciowego** — klonuje wyłącznie ze ścieżki lokalnej (patrz
-`git` README, sekcja "Known limitations"). `sync-base` robi więc
-dokładnie jedną rzecz przez systemowy `git` — pierwsze pobranie/
-odświeżenie lokalnego lustra — a każda kolejna operacja (kopia robocza
-per-build, log zmian) idzie już wyłącznie przez `hgit`.
+[cols="1,3"]
+|===
+|Komputery |ISO hybrydowe (BIOS + UEFI) dla `amd64`, ISO UEFI dla `arm64`, instalator Calamares z brandingiem LegendaryOS.
+|Telefony |Obraz rootfs + surowy obraz dysku z U-Bootem (PinePhone, PinePhone Pro, Librem 5) albo `boot.img` + `rootfs.img` dla fastboot (eksperymentalne). Środowisko: Phosh.
+|Kilka celów naraz |`-> targets => [pc:amd64, pc:arm64, phone:arm64:pinephone]` buduje wszystko jednym poleceniem, każdy cel w osobnym katalogu roboczym.
+|Cross-build |`arm64` na hoście `amd64` (i odwrotnie) przez `qemu-user-static` — wykrywany i konfigurowany automatycznie.
+|Baza HackerOS |Lokalne lustro + migawka per build; import list pakietów / hooków / includes do nakładki; commit bazy w notatkach wydania.
+|Branding |5 obrazów trafia do Calamares, Plymouth, GRUB i splash-a bootloaderów live; generowane są też pliki, które je aktywują (`branding.desc`, motyw Plymouth, konfiguracja GRUB, hook chroot).
+|Tożsamość systemu |`os-release`, `lsb-release`, `issue`, `motd`, `hostname` z `config.hk`.
+|Walidacja |Struktura, nagłówki obrazów (PNG/JPEG), wartości w `config.hk`, literówki w kluczach, spójność architektura ↔ urządzenie. Błędy pokazuje nidus.
+|CI-friendly |Poprawne kody wyjścia, `--strict`, `--dry-run`, `NO_COLOR`, styl `github` w Actions.
+|===
 
 == Instalacja
 
-Wymagania:
+Wymagania do *zbudowania buildera*:
 
 * `h#` — kompilator H# (https://github.com/HackerOS-Linux-System/H-Sharp)
-* `bytes` — H# Package Manager (https://github.com/HackerOS-Linux-System/bytes)
-* `hl` — interpreter Hacker Lang (część HackerOS)
-* `live-build` (pakiet `live-build` z repozytoriów Debiana)
-* `git` (tylko do jednorazowego `sync-base` — patrz wyżej)
+* `bit` — menedżer pakietów H# (https://github.com/bit-io/bit)
+
+Wymagania do *budowania systemów* (sprawdza je `legendaryos-builder doctor`):
+
+* `live-build`, `git`, `hl` (Hacker Lang), `xz`, `tar`
+* telefony: `e2fsprogs` (≥ 1.43), `parted` (+ `mkbootimg` dla Androida)
+* cross-build: `qemu-user-static`, `binfmt-support`
+* `lb build` wymaga roota
 
 [source,sh]
 ----
-git clone https://github.com/HackerOS-Linux-System/LegendaryOS-Builder.git
+git clone https://github.com/LegendaryOS/LegendaryOS-Builder.git
 cd LegendaryOS-Builder
 hl build.hl
 ----
 
-`build.hl` uruchamia `bytes install` (ściąga `git`/hgit z `[deps]` w
-`Bytes.hk`), `bytes build --release`, i instaluje binarkę do
-`/usr/bin/legendaryos-builder`.
+`build.hl`: `bit install` (colors, nidus) → `h# check` → `bit build --release`
+→ `selftest` → instalacja do `/usr/bin/legendaryos-builder` + dopełnianie
+komend (bash/zsh/fish). Usunięcie: `hl uninstall.hl`.
 
 == Szybki start
 
 [source,sh]
 ----
-legendaryos-builder new moj-projekt
-cd moj-projekt
+legendaryos-builder new MojeOS --kind both --device pinephone
+cd MojeOS
 # podmień pliki w branding/ na docelową grafikę
 # uzupełnij user.hk (organizacja + token)
 legendaryos-builder validate .
+legendaryos-builder doctor .
 legendaryos-builder sync-base
-legendaryos-builder build .
+sudo legendaryos-builder build .
 ----
 
-Gotowe ISO ląduje w `build/config/` wewnątrz projektu.
+Gotowe artefakty (ISO, obrazy, sumy SHA-256, notatki wydania) lądują w
+`build/out/`. Pełny, gotowy do wglądu przykład (z prawdziwą grafiką):
+link:examples/legendaryos-demo[`examples/legendaryos-demo/`].
 
-Pełny, gotowy do wglądu przykład (z realną, choć minimalną grafiką)
-znajduje się w link:examples/legendaryos-demo[`examples/legendaryos-demo/`].
+== Komputery i telefony
+
+Cele zapisuje się w `config.hk`:
+
+[source]
+----
+[project]
+-> targets => [pc:amd64, pc:arm64, phone:arm64:pinephone]
+----
+
+Format: `pc:<arch>` albo `phone:<arch>:<urządzenie>`. Lista urządzeń:
+`legendaryos-builder devices`. Filtrowanie przy budowie:
+
+[source,sh]
+----
+sudo legendaryos-builder build . --target phone          # tylko telefony
+sudo legendaryos-builder build . --arch arm64            # tylko arm64 (PC + telefon)
+sudo legendaryos-builder build . --target phone:arm64:pinephone
+----
+
+Szczegóły (układ obrazu, offsety U-Boota, dodawanie urządzeń, ograniczenia):
+link:docs/TARGETS.md[`docs/TARGETS.md`].
 
 == Wymagana struktura projektu
 
 [source]
 ----
 moj-projekt/
-├── branding/
-│   ├── banner.png
-│   ├── logo-bg.jpg
-│   ├── logo-bg.png
-│   ├── logo.png
-│   └── notext-bg.png
-├── scripts/
-│   └── *.hl            <- WYŁĄCZNIE Hacker Lang, żadnego shella
-├── files/                <- nakładka "after packages"
+├── branding/              <- 5 obrazów (patrz docs/STRUKTURA.md)
+├── scripts/*.hl           <- WYŁĄCZNIE Hacker Lang, żadnego shella
+├── files/                 <- nakładka "after packages"
+├── package-lists/         <- (opcjonalnie) własne *.list.chroot
 ├── build.hl               <- kroki budowy (Hacker Lang)
-├── config.hk               <- metadane projektu/wydania
-└── user.hk                   <- organizacja + token
+├── config.hk              <- metadane projektu/wydania
+└── user.hk                <- organizacja + token
 ----
 
-Pełny opis każdego elementu, wraz z uzasadnieniem (dlaczego akurat te
-pliki brandingu, dlaczego `user.hk` jest osobnym plikiem od `config.hk`
-itd.) jest w link:docs/STRUKTURA.md[`docs/STRUKTURA.md`].
-
-`legendaryos-builder validate <ścieżka>` sprawdza całą strukturę na raz
-i wypisuje listę wszystkich braków (błędy) oraz ostrzeżeń (np. pusty
-token w `user.hk`) — build jest blokowany wyłącznie przez błędy, nie
-przez ostrzeżenia.
+Pełny opis: link:docs/STRUKTURA.md[`docs/STRUKTURA.md`].
 
 == Komendy
 
-Wysokopoziomowe:
-
 [cols="1,3"]
 |===
 |Komenda |Opis
 
-|`new <nazwa>`
-|Utwórz szkielet nowego projektu (z realną, minimalną grafiką w `branding/` — projekt od razu przechodzi `validate`).
-
-|`validate [ścieżka]`
-|Zwaliduj strukturę projektu (domyślnie bieżący katalog).
-
-|`sync-base [--ref <gałąź>]`
-|Zsynchronizuj lokalną bazę HackerOS (patrz "Relacja z HackerOS" wyżej).
-
-|`build [ścieżka]`
-|Pełny build: `stage` → `run-scripts` → `lb-config` → `lb-build`.
-
-|`clean [ścieżka]`
-|Usuń katalog `build/` w projekcie.
-
-|`--version`, `-V`
-|Pokaż wersję.
-
-|`--help`, `-h`
-|Pomoc.
+|`new <nazwa> [--kind pc\|phone\|both] [--device ID]` |Szkielet projektu.
+|`validate [ścieżka]` |Walidacja (raport nidus, kod wyjścia ≠ 0 przy błędach).
+|`build [ścieżka]` |Pełny build wszystkich celów: skrypty → (stage → lb config → lb build → artefakty) × cel → notatki wydania.
+|`clean [ścieżka]` |Usuń `build/` (tylko w katalogu z `config.hk`).
+|`sync-base [--ref R]` |Lustro bazy HackerOS (`git`).
+|`targets [ścieżka]` |Cele projektu i ich obrazy.
+|`devices` |Profile telefonów.
+|`doctor [ścieżka]` |Czy środowisko ma narzędzia potrzebne dla celów projektu.
+|`info [ścieżka]` |Podsumowanie projektu.
+|`release-notes [ścieżka]` |Notatki wydania z `build/out`.
+|`completions <bash\|zsh\|fish>` |Dopełnianie komend.
+|`selftest` |Wbudowane testy (bez sieci i roota).
+|`run-scripts`, `stage`, `lb-config`, `lb-build` |Pojedyncze etapy builda (wołane też z `build.hl` projektu).
 |===
 
-Niskopoziomowe (pojedyncze etapy — wołane też z wewnątrz `build.hl`
-projektu, patrz `scripts::create` w `src/scaffold.h#`):
+Opcje: `--target`, `--arch`, `--suite`, `--ref`, `--iso-name`, `--no-base`,
+`--strict`, `--clean`, `--keep-going`, `--keep-staging`, `-n/--dry-run`,
+`-v/--verbose`, `--no-color`.
 
-[cols="1,3"]
-|===
-|Komenda |Opis
-
-|`stage [ścieżka]`
-|Złóż nakładkę `live-build` z `branding/` + `files/` w `build/.staging/`.
-
-|`run-scripts [ścieżka]`
-|Uruchom `scripts/*.hl`, w kolejności alfabetycznej, przez `hl`.
-
-|`lb-config [ścieżka]`
-|`lb config` z ustawieniami z `config.hk` (`[release] -> suite`, `[project] -> arch`).
-
-|`lb-build [ścieżka]`
-|`lb build` — właściwe budowanie ISO.
-|===
-
-== Zależności (`Bytes.hk`)
+== Zależności (`Bit.hk`)
 
 [source]
 ----
-[deps]
--> git => https://github.com/HackerOS-Linux-System/git.git
+[dependencies]
+-> colors => newest
+-> nidus  => newest
 ----
 
-`git` (moduł importowany jako `hgit`, patrz `use "hlib -> hgit" from
-"hgit"`) to implementacja Gita napisana w 100% w H#, używana przez
-`src/gitsync.h#` do wersjonowania lokalnej kopii bazy HackerOS.
+`bit install` zapisuje wynik do `Bit.lock` — warto go commitować.
+
+NOTE: Biblioteka `git` (hgit) *nie jest* zależnością — patrz `CHANGELOG.md`
+(0.7.0). Cała praca z gitem jest zamknięta w `src/gitsync.h#`, więc
+podmiana backendu nie dotyka reszty kodu.
 
 == Bezpieczeństwo `user.hk`
 
-`user.hk` to jedyny plik z sekretem (`[auth] -> token`) — celowo osobny
-od `config.hk`, żeby dało się go trzymać poza kontrolą wersji bez
-mieszania w to reszty metadanych projektu. `legendaryos-builder new`
-od razu dopisuje `user.hk` do wygenerowanego `.gitignore`. **Nigdy nie
-commituj `user.hk` z wypełnionym tokenem.**
+`user.hk` to jedyny plik z sekretem (`[auth] -> token`) — osobny od
+`config.hk`, by trzymać go poza kontrolą wersji. `new` dopisuje go do
+`.gitignore`. Token można też podać zmienną `LEGENDARYOS_TOKEN` (CI).
+Do `git` trafia przez zmienne środowiskowe `GIT_CONFIG_*` — nigdy w linii
+poleceń ani w URL-u. **Nigdy nie commituj `user.hk` z wypełnionym tokenem.**
+
+== Rozwój
+
+[source,sh]
+----
+bit install
+h# check src/main.h#
+bit build --release
+./cache/build/release/legendaryos-builder selftest
+----
+
+Pakiety: `packaging/arch/PKGBUILD`, `packaging/debian/build.sh`.
 
 == Licencja
 
