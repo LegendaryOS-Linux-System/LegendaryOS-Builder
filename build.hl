@@ -1,17 +1,16 @@
 #!/usr/bin/hl
 using <gen 2>
 
-%RELEASE: str = --release
 %BIN_NAME: str = legendaryos-builder
-%BUILD_OUT: str = build/legendaryos-builder
+%BUILD_OUT: str = cache/build/release/legendaryos-builder
 %INSTALL_PATH: str = /usr/bin/legendaryos-builder
 
-~> ==> Sprawdzanie zależności (bytes, h#)...
+~> ==> Sprawdzanie zależności (bit, h#)...
 
-::which bytes
+::which bit
 ? err
-    ~> BŁĄD: nie znaleziono `bytes` (H# Package Manager) w PATH.
-    ~> Zainstaluj go najpierw: https://github.com/HackerOS-Linux-System/bytes
+    ~> BŁĄD: nie znaleziono `bit` (menedżer pakietów H#) w PATH.
+    ~> Zainstaluj go najpierw: https://github.com/bit-io/bit
     > exit 1
 done
 
@@ -22,15 +21,22 @@ done
     > exit 1
 done
 
-~> ==> Pobieranie zależności (bytes install)...
-> bytes install
+~> ==> Pobieranie bibliotek (bit install: colors, nidus)...
+> bit install
 ? err
-    ~> BŁĄD: `bytes install` nie powiodło się -- sprawdź [deps] w Bytes.hk.
+    ~> BŁĄD: `bit install` nie powiodło się -- sprawdź [dependencies] w Bit.hk.
     > exit 1
 done
 
-~> ==> Budowanie @BIN_NAME (bytes build @RELEASE)...
-> bytes build @RELEASE
+~> ==> Sprawdzanie typów (h# check)...
+> h# check src/main.h#
+? err
+    ~> BŁĄD: sprawdzanie typów nie powiodło się.
+    > exit 1
+done
+
+~> ==> Budowanie @BIN_NAME (bit build --release)...
+> bit build --release
 ? err
     ~> BŁĄD: budowa nie powiodła się.
     > exit 1
@@ -42,11 +48,23 @@ done
     > exit 1
 done
 
+~> ==> Testy wbudowane (selftest)...
+> @BUILD_OUT selftest
+? err
+    ~> BŁĄD: selftest nie przeszedł -- nie instaluję.
+    > exit 1
+done
+
 ~> ==> Instalacja do @INSTALL_PATH (wymaga sudo)...
 > sudo install -Dm755 @BUILD_OUT @INSTALL_PATH
 ? err
     ~> BŁĄD: instalacja nie powiodła się (brak uprawnień?).
     > exit 1
 done
+
+~> ==> Dopełnianie komend (bash/zsh/fish)...
+> sudo sh -c "@INSTALL_PATH completions bash > /usr/share/bash-completion/completions/legendaryos-builder"
+> sudo sh -c "@INSTALL_PATH completions zsh > /usr/share/zsh/vendor-completions/_legendaryos-builder"
+> sudo sh -c "@INSTALL_PATH completions fish > /usr/share/fish/vendor_completions.d/legendaryos-builder.fish"
 
 ~> ==> Gotowe! Uruchom: legendaryos-builder --help
