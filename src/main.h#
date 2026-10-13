@@ -1,16 +1,13 @@
 mod version
 mod hkconf
 mod project
-mod branding
-mod scriptrunner
-mod livebuild
-mod gitsync
-mod scaffold
 mod cli
+mod sh
 
 use "std -> env" from "env"
 
 fn main() is
     let argv: [string] = env::args()
-    cli::dispatch(argv)
+    let code: int = cli::dispatch(argv)
+    if code != 0 is sh::quit(code) end
 end
