@@ -1,0 +1,89 @@
+mod project
+mod hkconf
+mod opts
+mod sh
+mod devices
+mod target
+
+;; Listy pakietów dla live-build, zależne od celu (komputer/telefon),
+;; architektury i urządzenia. `package_names` jest czystą funkcją (łatwo
+;; ją testować); `stage` zapisuje wynik + dokleja własne listy projektu.
+
+fn grub_packages(arch: string) -> [string] is
+    if arch == "amd64" is return ["grub-efi-amd64-bin", "grub-pc-bin", "grub-common", "efibootmgr", "os-prober"] end
+    if arch == "arm64" is return ["grub-efi-arm64-bin", "grub-common", "efibootmgr", "os-prober"] end
+    if arch == "armhf" is return ["grub-efi-arm-bin", "grub-common", "efibootmgr"] end
+    if arch == "i386" is return ["grub-pc-bin", "grub-common", "os-prober"] end
+    return []
+end
+
+fn desktop_packages(name: string) -> [string] is
+    if name == "xfce" is return ["task-xfce-desktop"] end
+    if name == "gnome" is return ["task-gnome-desktop"] end
+    if name == "kde" is return ["task-kde-desktop"] end
+    return []
+end
+
+fn shell_packages(name: string) -> [string] is
+    if name == "phosh" is
+        return ["phosh", "phoc", "squeekboard", "feedbackd", "callaudiod", "gnome-calls", "chatty",
+                "gnome-contacts", "gnome-settings-daemon"]
+    end
+    return []
+end
+
+fn append_all(base: [string], extra: [string]) -> [string] is
+    let mut out: [string] = base
+    let mut i: int = 0
+    while i < array_len(extra) is
+        if !array_contains(out, extra[i]) is out.push(extra[i]) end
+        i += 1
+    end
+    return out
+end
+
+pub fn package_names(p: project::Project, t: target::Target) -> [string] is
+    let mut names: [string] = ["systemd-sysv", "sudo", "network-manager", "locales", "ca-certificates", "plymouth"]
+
+    if t.kind == "pc" is
+        names = append_all(names, ["live-boot", "live-config", "live-config-systemd", "calamares",
+                                   "calamares-settings-debian", "plymouth-themes"])
+        names = append_all(names, grub_packages(t.arch))
+        names = append_all(names, desktop_packages(hkconf::get_or(p.config, "packages", "desktop", "none")))
+    else is
+        names = append_all(names, ["initramfs-tools", "e2fsprogs", "dosfstools", "modemmanager", "wpasupplicant",
+                                   "iw", "bluez", "openssh-server", "firmware-linux-free"])
+        names = append_all(names, shell_packages(t.shell))
+        let dev: devices::Device = devices::find(t.device)
+        names = append_all(names, dev.packages)
+    end
+
+    names = append_all(names, hkconf::get_list(p.config, "packages", "include"))
+
+    let excl: [string] = hkconf::get_list(p.config, "packages", "exclude")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(names) is
+        if !array_contains(excl, names[i]) is out.push(names[i]) end
+        i += 1
+    end
+    return out
+end
+
+pub fn stage(p: project::Project, t: target::Target, cfg_dir: string) -> int is
+    let names: [string] = package_names(p, t)
+    let mut out: string = "# wygenerowane przez legendaryos-builder (cel: " + t.kind + "/" + t.arch + ")\n"
+    let mut i: int = 0
+    while i < array_len(names) is
+        out = out + names[i] + "\n"
+        i += 1
+    end
+    sh::write_text(path_join(path_join(cfg_dir, "package-lists"), "legendaryos-base.list.chroot"), out)
+
+    ;; własne listy projektu (package-lists/*.list.chroot|binary)
+    let own: string = path_join(p.root, "package-lists")
+    if fs_is_dir(own) is
+        sh::copy_tree(own, path_join(cfg_dir, "package-lists"))
+    end
+    return array_len(names)
+end
