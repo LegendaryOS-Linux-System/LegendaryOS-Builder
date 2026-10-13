@@ -1,0 +1,66 @@
+mod devices
+
+;; Dopełnianie komend w powłoce (generowane, bez plików statycznych).
+
+pub fn commands() -> [string] is
+    return ["new", "validate", "build", "clean", "sync-base", "stage", "run-scripts", "lb-config", "lb-build",
+            "targets", "devices", "doctor", "info", "release-notes", "completions", "selftest", "help", "version"]
+end
+
+pub fn flags() -> [string] is
+    return ["--verbose", "--dry-run", "--keep-staging", "--no-base", "--yes", "--strict", "--clean",
+            "--no-color", "--keep-going", "--arch", "--suite", "--ref", "--iso-name", "--target",
+            "--kind", "--device", "--help", "--version"]
+end
+
+pub fn bash() -> string is
+    let mut o: string = "# bash completion dla legendaryos-builder\n_legendaryos_builder() {\n"
+    o = o + "    local cur=\"${{COMP_WORDS[COMP_CWORD]}}\" prev=\"${{COMP_WORDS[COMP_CWORD-1]}}\"\n"
+    o = o + "    case \"$prev\" in\n"
+    o = o + "        --arch) COMPREPLY=($(compgen -W \"amd64 arm64 armhf i386\" -- \"$cur\")); return ;;\n"
+    o = o + "        --target) COMPREPLY=($(compgen -W \"pc phone\" -- \"$cur\")); return ;;\n"
+    o = o + "        --kind) COMPREPLY=($(compgen -W \"pc phone both\" -- \"$cur\")); return ;;\n"
+    o = o + "        --device) COMPREPLY=($(compgen -W \"" + str_join(devices::ids(), " ") + "\" -- \"$cur\")); return ;;\n"
+    o = o + "        completions) COMPREPLY=($(compgen -W \"bash zsh fish\" -- \"$cur\")); return ;;\n"
+    o = o + "    esac\n"
+    o = o + "    if [ \"$COMP_CWORD\" -eq 1 ]; then\n"
+    o = o + "        COMPREPLY=($(compgen -W \"" + str_join(commands(), " ") + "\" -- \"$cur\"))\n"
+    o = o + "    else\n"
+    o = o + "        COMPREPLY=($(compgen -W \"" + str_join(flags(), " ") + "\" -- \"$cur\") $(compgen -d -- \"$cur\"))\n"
+    o = o + "    fi\n}\ncomplete -F _legendaryos_builder legendaryos-builder\n"
+    return o
+end
+
+pub fn zsh() -> string is
+    let mut o: string = "#compdef legendaryos-builder\n_legendaryos_builder() {\n"
+    o = o + "    local -a cmds flags\n"
+    o = o + "    cmds=(" + str_join(commands(), " ") + ")\n"
+    o = o + "    flags=(" + str_join(flags(), " ") + ")\n"
+    o = o + "    if (( CURRENT == 2 )); then\n        _describe 'komenda' cmds\n    else\n        _describe 'opcja' flags\n        _files -/\n    fi\n}\n"
+    o = o + "_legendaryos_builder \"$@\"\n"
+    return o
+end
+
+pub fn fish() -> string is
+    let mut o: string = "# fish completion dla legendaryos-builder\n"
+    let cmds: [string] = commands()
+    let mut i: int = 0
+    while i < array_len(cmds) is
+        o = o + "complete -c legendaryos-builder -n '__fish_use_subcommand' -a " + cmds[i] + "\n"
+        i += 1
+    end
+    let fl: [string] = flags()
+    i = 0
+    while i < array_len(fl) is
+        o = o + "complete -c legendaryos-builder -l " + string_slice(fl[i], 2, string_len(fl[i])) + "\n"
+        i += 1
+    end
+    return o
+end
+
+pub fn for_shell(name: string) -> string is
+    if name == "bash" is return bash() end
+    if name == "zsh" is return zsh() end
+    if name == "fish" is return fish() end
+    return ""
+end
