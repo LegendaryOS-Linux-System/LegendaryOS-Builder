@@ -1,0 +1,89 @@
+mod project
+mod hkconf
+mod opts
+mod target
+mod devices
+mod sh
+mod ui
+
+;; `doctor`: czy to środowisko potrafi zbudować to, czego chcemy.
+;; Sprawdza narzędzia zależnie od celów projektu (komputer/telefon/cross).
+
+fn row(ok: bool, what: string, hint: string) -> bool is
+    if ok is
+        ui::ok(what)
+    else is
+        ui::fail(what + "  ->  " + hint)
+    end
+    return ok
+end
+
+fn need(tool: string, hint: string) -> bool is
+    return row(sh::tool_exists(tool), tool, hint)
+end
+
+;; Zwraca liczbę brakujących wymagań.
+pub fn run_checks(p: project::Project, has_project: bool, o: opts::Options) -> int is
+    let mut missing: int = 0
+    let host: string = target::host_arch()
+    ui::title("Środowisko")
+    ui::kv("host", host)
+    ui::kv("root", if sh::is_root() then "tak" else "nie (potrzebny do lb build)")
+    let free: int = sh::free_mb(".")
+    if free >= 0 is ui::kv("wolne miejsce", to_string(free) + " MiB") end
+
+    ui::title("Narzędzia podstawowe")
+    if !need("lb", "apt install live-build") is missing += 1 end
+    if !need("hl", "zainstaluj Hacker Lang (HackerOS)") is missing += 1 end
+    if !need("git", "apt install git") is missing += 1 end
+    if !need("sha256sum", "apt install coreutils") is missing += 1 end
+    if !need("tar", "apt install tar") is missing += 1 end
+    if !need("xz", "apt install xz-utils") is missing += 1 end
+
+    let mut targets: [target::Target] = []
+    if has_project is targets = target::resolve_all(p, o, host) end
+    let mut phone: bool = false
+    let mut android: bool = false
+    let mut cross: [string] = []
+    let mut i: int = 0
+    while i < array_len(targets) is
+        if targets[i].kind == "phone" is phone = true end
+        if devices::find(targets[i].device).boot == "android" is android = true end
+        if targets[i].qemu_arch != "" && !array_contains(cross, targets[i].arch) is cross.push(targets[i].arch) end
+        i += 1
+    end
+
+    if phone is
+        ui::title("Obrazy telefonów")
+        if !need("mke2fs", "apt install e2fsprogs") is missing += 1 end
+        if !need("parted", "apt install parted") is missing += 1 end
+        if !need("dd", "apt install coreutils") is missing += 1 end
+        if !need("truncate", "apt install coreutils") is missing += 1 end
+        if android is
+            if !need("mkbootimg", "apt install mkbootimg") is missing += 1 end
+        end
+    end
+
+    if array_len(cross) > 0 is
+        ui::title("Budowa międzyarchitekturowa (host " + host + ")")
+        let mut c: int = 0
+        while c < array_len(cross) is
+            let q: string = target::qemu_static_for(cross[c])
+            if !row(fs_is_file(q), q, "apt install qemu-user-static binfmt-support") is missing += 1 end
+            c += 1
+        end
+    end
+
+    if has_project is
+        ui::title("Cele projektu")
+        let mut k: int = 0
+        while k < array_len(targets) is
+            ui::info(target::label(targets[k]) + "  ->  " + str_join(targets[k].images, ", "))
+            k += 1
+        end
+        if array_len(targets) == 0 is
+            ui::warn("żaden cel nie pasuje do filtrów (--target/--arch)")
+        end
+    end
+    return missing
+end
