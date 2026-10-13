@@ -1,0 +1,90 @@
+fn min3(a: int, b: int, c: int) -> int is
+    let mut m: int = a
+    if b < m is m = b end
+    if c < m is m = c end
+    return m
+end
+
+;; Odległość Levenshteina (małe ciągi -- nazwy kluczy/wartości).
+pub fn distance(a: string, b: string) -> int is
+    let la: int = string_len(a)
+    let lb: int = string_len(b)
+    if la == 0 is return lb end
+    if lb == 0 is return la end
+    let mut prev: [int] = []
+    let mut j: int = 0
+    while j <= lb is
+        prev.push(j)
+        j += 1
+    end
+    let mut i: int = 1
+    while i <= la is
+        let mut cur: [int] = [i]
+        let mut k: int = 1
+        while k <= lb is
+            let mut cost: int = 1
+            if string_at(a, i - 1) == string_at(b, k - 1) is cost = 0 end
+            cur.push(min3(prev[k] + 1, cur[k - 1] + 1, prev[k - 1] + cost))
+            k += 1
+        end
+        prev = cur
+        i += 1
+    end
+    return prev[lb]
+end
+
+;; Najbliższy kandydat (odległość <= 2, lub <= 3 dla długich słów) albo "".
+pub fn suggest(word: string, candidates: [string]) -> string is
+    let mut best: string = ""
+    let mut best_d: int = 1000
+    let limit: int = if string_len(word) > 6 then 3 else 2
+    let mut i: int = 0
+    while i < array_len(candidates) is
+        let d: int = distance(string_lower(word), string_lower(candidates[i]))
+        if d < best_d is
+            best_d = d
+            best = candidates[i]
+        end
+        i += 1
+    end
+    if best_d <= limit is return best end
+    return ""
+end
+
+fn hex_digit(c: string) -> int is
+    let digits: string = "0123456789abcdef"
+    return string_find(digits, string_lower(c))
+end
+
+;; "#RRGGBB" -> [r, g, b]; przy błędzie [0, 0, 0].
+pub fn parse_hex(s: string) -> [int] is
+    let t: string = string_trim(s)
+    if string_len(t) != 7 || !string_starts_with(t, "#") is return [0, 0, 0] end
+    let mut out: [int] = []
+    let mut i: int = 1
+    while i < 7 is
+        let hi: int = hex_digit(string_at(t, i))
+        let lo: int = hex_digit(string_at(t, i + 1))
+        if hi < 0 || lo < 0 is return [0, 0, 0] end
+        out.push(hi * 16 + lo)
+        i += 2
+    end
+    return out
+end
+
+;; 0..255 -> "0.000".."1.000" (Plymouth chce ułamków).
+pub fn frac(v: int) -> string is
+    let milli: int = v * 1000 / 255
+    let mut ms: string = to_string(milli % 1000)
+    while string_len(ms) < 3 is ms = "0" + ms end
+    if milli >= 1000 is return "1.000" end
+    return "0." + ms
+end
+
+;; Zamiana na bezpieczny identyfikator (ID w os-release, nazwy plików).
+pub fn slug(s: string) -> string is
+    let mut t: string = string_lower(string_trim(s))
+    t = string_replace_all(t, " ", "-")
+    t = string_replace_all(t, "_", "-")
+    return t
+end
