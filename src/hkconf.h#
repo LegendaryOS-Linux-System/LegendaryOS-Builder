@@ -1,99 +1,382 @@
-use "std -> fs"          from "fs"
-use "std -> strings"     from "str"
-use "std -> collections" from "col"
-
 pub struct HkFile is
     pub path:   string
-    pub values: any   ;; hashmap "sekcja.klucz" -> "wartość"
     pub exists: bool
+    pub text:   string
+    pub keys:   [string]   ;; "sekcja.klucz", w kolejności wystąpienia
+    pub vals:   [string]
+    pub koff:   [int]      ;; offset klucza w tekście
+    pub klen:   [int]
+    pub voff:   [int]      ;; offset wartości (== koff gdy brak wartości)
+    pub vlen:   [int]
+    pub snames: [string]   ;; nagłówki sekcji
+    pub soff:   [int]
+    pub slen:   [int]
+    pub perr_off: [int]    ;; błędy składni pliku
+    pub perr_len: [int]
+    pub perr_msg: [string]
+    pub perr_help: [string]
 end
 
-struct KV is
-    key: string
-    val: string
+fn is_quote(c: string) -> bool is
+    return c == "\"" || c == "'"
 end
 
-fn strip_comment(line: string) -> string is
-    let semi = str::index_of(line, ";;")
-    if semi >= 0 is return str::trim(line[0..semi]) end
-    return line
+;; Obetnij komentarz ";;" spoza cudzysłowów.
+pub fn strip_comment(line: string) -> string is
+    let n: int = string_len(line)
+    let mut i: int = 0
+    let mut q: string = ""
+    while i < n is
+        let c: string = string_at(line, i)
+        if q == "" is
+            if is_quote(c) is
+                q = c
+            else is
+                if c == ";" && i + 1 < n && string_at(line, i + 1) == ";" is
+                    return string_trim(string_slice(line, 0, i))
+                end
+            end
+        else is
+            if c == q is q = "" end
+        end
+        i += 1
+    end
+    return string_trim(line)
 end
 
-fn unquote(s: string) -> string is
-    let t = str::trim(s)
-    if t.len() >= 2 && t.starts_with("\"") && t.ends_with("\"") is
-        return t[1..t.len() - 1]
+;; Czy w linii jest niedomknięty cudzysłów?
+fn unterminated_quote(line: string) -> bool is
+    let n: int = string_len(line)
+    let mut i: int = 0
+    let mut q: string = ""
+    while i < n is
+        let c: string = string_at(line, i)
+        if q == "" is
+            if c == ";" && i + 1 < n && string_at(line, i + 1) == ";" is return false end
+            if is_quote(c) is q = c end
+        else is
+            if c == q is q = "" end
+        end
+        i += 1
+    end
+    return q != ""
+end
+
+pub fn unquote(s: string) -> string is
+    let t: string = string_trim(s)
+    let n: int = string_len(t)
+    if n >= 2 is
+        let a: string = string_at(t, 0)
+        let b: string = string_at(t, n - 1)
+        if is_quote(a) && a == b is
+            return string_slice(t, 1, n - 1)
+        end
     end
     return t
 end
 
-fn parse_kv(line: string) -> KV is
-    ;; usuń wiodące "->"
-    let mut body = str::trim(line)
-    if body.starts_with("->") is
-        body = str::trim(body[2..body.len()])
-    end
-    let arrow = str::index_of(body, "=>")
-    if arrow < 0 is
-        return KV { key: unquote(body), val: "" }
-    end
-    let key = unquote(str::trim(body[0..arrow]))
-    let val = unquote(str::trim(body[arrow + 2..body.len()]))
-    return KV { key: key, val: val }
+pub fn empty(path: string) -> HkFile is
+    return HkFile {
+        path: path, exists: false, text: "",
+        keys: [], vals: [], koff: [], klen: [], voff: [], vlen: [],
+        snames: [], soff: [], slen: [],
+        perr_off: [], perr_len: [], perr_msg: [], perr_help: [],
+    }
 end
 
-;; Wczytaj plik .hk. Brak pliku NIE jest błędem krytycznym -- zwracany
-;; jest pusty HkFile z `exists: false`, tak żeby wołający sam
-;; zdecydował, czy brak np. user.hk jest fatalny (patrz project.h#).
-pub fn load(path: string) -> HkFile is
-    let mut values = col::hashmap_new()
-    if !fs::exists(path) is
-        return HkFile { path: path, values: values, exists: false }
-    end
-
-    let lines: [string] = fs::read_lines(path)
-    let mut section: string = ""
+;; Liczba wiodących spacji/tabów.
+fn lead_ws(s: string) -> int is
+    let n: int = string_len(s)
     let mut i: int = 0
-    while i < lines.len() is
-        let raw = lines[i]
+    while i < n is
+        let c: string = string_at(s, i)
+        if c != " " && c != "\t" is return i end
         i += 1
-        let line = strip_comment(str::trim(raw))
-        if line == "" is continue end
-        if line.starts_with("#") is continue end
+    end
+    return n
+end
 
-        if line.starts_with("[") && line.ends_with("]") is
-            section = str::trim(line[1..line.len() - 1])
+fn skip_ws_from(s: string, start: int) -> int is
+    let n: int = string_len(s)
+    let mut i: int = start
+    while i < n is
+        let c: string = string_at(s, i)
+        if c != " " && c != "\t" is return i end
+        i += 1
+    end
+    return n
+end
+
+fn set_value(hk: HkFile, key: string, val: string, ko: int, kl: int, vo: int, vl: int) -> HkFile is
+    let mut ks = hk.keys
+    let mut vs = hk.vals
+    let mut kos = hk.koff
+    let mut kls = hk.klen
+    let mut vos = hk.voff
+    let mut vls = hk.vlen
+    let mut i: int = 0
+    while i < array_len(ks) is
+        if ks[i] == key is
+            vs[i] = val
+            kos[i] = ko
+            kls[i] = kl
+            vos[i] = vo
+            vls[i] = vl
+            return HkFile { path: hk.path, exists: hk.exists, text: hk.text,
+                keys: ks, vals: vs, koff: kos, klen: kls, voff: vos, vlen: vls,
+                snames: hk.snames, soff: hk.soff, slen: hk.slen,
+                perr_off: hk.perr_off, perr_len: hk.perr_len, perr_msg: hk.perr_msg, perr_help: hk.perr_help }
+        end
+        i += 1
+    end
+    ks.push(key)
+    vs.push(val)
+    kos.push(ko)
+    kls.push(kl)
+    vos.push(vo)
+    vls.push(vl)
+    return HkFile { path: hk.path, exists: hk.exists, text: hk.text,
+        keys: ks, vals: vs, koff: kos, klen: kls, voff: vos, vlen: vls,
+        snames: hk.snames, soff: hk.soff, slen: hk.slen,
+        perr_off: hk.perr_off, perr_len: hk.perr_len, perr_msg: hk.perr_msg, perr_help: hk.perr_help }
+end
+
+fn add_section(hk: HkFile, name: string, off: int, len: int) -> HkFile is
+    let mut a = hk.snames
+    let mut b = hk.soff
+    let mut c = hk.slen
+    a.push(name)
+    b.push(off)
+    c.push(len)
+    return HkFile { path: hk.path, exists: hk.exists, text: hk.text,
+        keys: hk.keys, vals: hk.vals, koff: hk.koff, klen: hk.klen, voff: hk.voff, vlen: hk.vlen,
+        snames: a, soff: b, slen: c,
+        perr_off: hk.perr_off, perr_len: hk.perr_len, perr_msg: hk.perr_msg, perr_help: hk.perr_help }
+end
+
+fn add_perr(hk: HkFile, off: int, len: int, msg: string, help: string) -> HkFile is
+    let mut a = hk.perr_off
+    let mut b = hk.perr_len
+    let mut c = hk.perr_msg
+    let mut d = hk.perr_help
+    a.push(off)
+    b.push(len)
+    c.push(msg)
+    d.push(help)
+    return HkFile { path: hk.path, exists: hk.exists, text: hk.text,
+        keys: hk.keys, vals: hk.vals, koff: hk.koff, klen: hk.klen, voff: hk.voff, vlen: hk.vlen,
+        snames: hk.snames, soff: hk.soff, slen: hk.slen,
+        perr_off: a, perr_len: b, perr_msg: c, perr_help: d }
+end
+
+;; Parsuj tekst pliku .hk (używane przez `load` i przez selftest).
+pub fn parse_text(text: string, path: string) -> HkFile is
+    let lines: [string] = string_split(text, "\n")
+    let mut hk: HkFile = empty(path)
+    hk = HkFile { path: path, exists: true, text: text,
+        keys: [], vals: [], koff: [], klen: [], voff: [], vlen: [],
+        snames: [], soff: [], slen: [],
+        perr_off: [], perr_len: [], perr_msg: [], perr_help: [] }
+    let mut section: string = ""
+    let mut parent: string = ""
+    let mut pos: int = 0
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let raw: string = lines[i]
+        let line_start: int = pos
+        pos = pos + string_len(raw) + 1
+        i += 1
+
+        let lead: int = lead_ws(raw)
+        let line: string = strip_comment(string_replace(raw, "\r", ""))
+        if line == "" is continue end
+        if string_starts_with(line, "#") || string_starts_with(line, "!") is continue end
+        let vis_len: int = string_len(string_trim(raw))
+
+        if string_starts_with(line, "[") is
+            if !string_ends_with(line, "]") is
+                hk = add_perr(hk, line_start + lead, string_len(line),
+                    "nagłówek sekcji nie jest zamknięty", "dopisz `]` na końcu: " + line + "]")
+                continue
+            end
+            section = string_trim(string_slice(line, 1, string_len(line) - 1))
+            parent = ""
+            hk = add_section(hk, section, line_start + lead, string_len(line))
             continue
         end
 
-        if !line.starts_with("->") is continue end
+        let is_sub: bool = string_starts_with(line, "-->")
+        if !is_sub && !string_starts_with(line, "->") is
+            hk = add_perr(hk, line_start + lead, string_len(line),
+                "linia nie jest sekcją, kluczem ani komentarzem",
+                "klucze zapisuje się jako `-> klucz => wartość`, komentarze zaczynają się od `;;`")
+            continue
+        end
+        if section == "" is
+            hk = add_perr(hk, line_start + lead, string_len(line),
+                "klucz poza sekcją", "umieść go pod nagłówkiem, np. `[project]`")
+            continue
+        end
+        if unterminated_quote(raw) is
+            hk = add_perr(hk, line_start + lead, vis_len,
+                "niedomknięty cudzysłów", "dopisz zamykający cudzysłów")
+            continue
+        end
 
-        let kv = parse_kv(line)
-        if kv.key == "" is continue end
-        let full_key = section + "." + kv.key
-        values = col::hashmap_insert(values, full_key, kv.val)
+        let arrow_pos: int = string_find(raw, "->")
+        let kstart: int = skip_ws_from(raw, arrow_pos + 2)
+        let mut body: string = line
+        if is_sub is
+            body = string_trim(string_slice(line, 3, string_len(line)))
+        else is
+            body = string_trim(string_slice(line, 2, string_len(line)))
+        end
+
+        let arrow: int = string_find(body, "=>")
+        let mut key: string = unquote(body)
+        let mut val: string = ""
+        let mut raw_val: string = ""
+        if arrow >= 0 is
+            key = unquote(string_slice(body, 0, arrow))
+            raw_val = string_trim(string_slice(body, arrow + 2, string_len(body)))
+            val = unquote(raw_val)
+        end
+        if key == "" is
+            hk = add_perr(hk, line_start + lead, vis_len, "pusta nazwa klucza", "podaj nazwę: `-> nazwa => wartość`")
+            continue
+        end
+
+        let klen: int = string_len(key)
+        let mut voff: int = line_start + kstart
+        let mut vlen: int = klen
+        if arrow >= 0 is
+            let eq_pos: int = string_find(raw, "=>")
+            voff = line_start + skip_ws_from(raw, eq_pos + 2)
+            vlen = string_len(raw_val)
+            if vlen == 0 is
+                voff = line_start + eq_pos
+                vlen = 2
+            end
+        end
+
+        if is_sub is
+            if parent == "" is
+                hk = add_perr(hk, line_start + lead, vis_len, "pod-klucz `-->` bez klucza nadrzędnego",
+                    "najpierw zapisz klucz `-> nazwa`")
+                continue
+            end
+            hk = set_value(hk, section + "." + parent + "." + key, val, line_start + kstart, klen, voff, vlen)
+        else is
+            parent = key
+            hk = set_value(hk, section + "." + key, val, line_start + kstart, klen, voff, vlen)
+        end
     end
-
-    return HkFile { path: path, values: values, exists: true }
+    return hk
 end
 
-pub fn get(hk: HkFile, section: string, key: string) -> string is
-    let v = col::hashmap_get(hk.values, section + "." + key)
-    if v == nil is return "" end
-    return v
-end
-
-pub fn get_or(hk: HkFile, section: string, key: string, default: string) -> string is
-    let v = get(hk, section, key)
-    if v == "" is return default end
-    return v
+;; Brak pliku NIE jest błędem krytycznym -- zwracany jest pusty HkFile z
+;; `exists: false`, a wołający sam decyduje, czy to fatalne (project.h#).
+pub fn load(path: string) -> HkFile is
+    if !fs_exists(path) is return empty(path) end
+    return parse_text(fs_read(path), path)
 end
 
 pub fn has(hk: HkFile, section: string, key: string) -> bool is
-    return col::hashmap_contains(hk.values, section + "." + key)
+    return array_contains(hk.keys, section + "." + key)
 end
 
-pub fn get_bool(hk: HkFile, section: string, key: string) -> bool is
-    let v = str::to_lower(get(hk, section, key))
-    return v == "true" || v == "1" || v == "yes"
+fn index_of_key(hk: HkFile, section: string, key: string) -> int is
+    let full: string = section + "." + key
+    let mut i: int = 0
+    while i < array_len(hk.keys) is
+        if hk.keys[i] == full is return i end
+        i += 1
+    end
+    return -1
+end
+
+pub fn get(hk: HkFile, section: string, key: string) -> string is
+    let idx: int = index_of_key(hk, section, key)
+    if idx < 0 is return "" end
+    return hk.vals[idx]
+end
+
+pub fn get_or(hk: HkFile, section: string, key: string, fallback: string) -> string is
+    let v: string = get(hk, section, key)
+    if v == "" is return fallback end
+    return v
+end
+
+pub fn get_bool(hk: HkFile, section: string, key: string, fallback: bool) -> bool is
+    if !has(hk, section, key) is return fallback end
+    let v: string = string_lower(get(hk, section, key))
+    return v == "true" || v == "1" || v == "yes" || v == "on"
+end
+
+;; Lista: `[a, b, "c d"]` albo `a, b`. Puste elementy są pomijane.
+pub fn get_list(hk: HkFile, section: string, key: string) -> [string] is
+    let raw: string = string_trim(get(hk, section, key))
+    let mut out: [string] = []
+    if raw == "" is return out end
+    let mut inner: string = raw
+    if string_starts_with(raw, "[") && string_ends_with(raw, "]") is
+        inner = string_slice(raw, 1, string_len(raw) - 1)
+    end
+    let parts: [string] = string_split(inner, ",")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        let item: string = unquote(parts[i])
+        if item != "" is out.push(item) end
+        i += 1
+    end
+    return out
+end
+
+;; Wszystkie klucze danej sekcji (bez prefiksu "sekcja."), w kolejności pliku.
+pub fn section_keys(hk: HkFile, section: string) -> [string] is
+    let prefix: string = section + "."
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(hk.keys) is
+        if string_starts_with(hk.keys[i], prefix) is
+            out.push(string_slice(hk.keys[i], string_len(prefix), string_len(hk.keys[i])))
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Wszystkie nazwy sekcji (unikalne, w kolejności).
+pub fn sections(hk: HkFile) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(hk.snames) is
+        if !array_contains(out, hk.snames[i]) is out.push(hk.snames[i]) end
+        i += 1
+    end
+    return out
+end
+
+;; ── lokalizacja w tekście (dla nidus) ────────────────────────────────
+;; Wszystkie zwracają [offset, długość] albo [] gdy nie ma czego wskazać.
+
+pub fn locate_value(hk: HkFile, section: string, key: string) -> [int] is
+    let idx: int = index_of_key(hk, section, key)
+    if idx < 0 is return [] end
+    return [hk.voff[idx], hk.vlen[idx]]
+end
+
+pub fn locate_key(hk: HkFile, section: string, key: string) -> [int] is
+    let idx: int = index_of_key(hk, section, key)
+    if idx < 0 is return [] end
+    return [hk.koff[idx], hk.klen[idx]]
+end
+
+pub fn locate_section(hk: HkFile, section: string) -> [int] is
+    let mut i: int = 0
+    while i < array_len(hk.snames) is
+        if hk.snames[i] == section is return [hk.soff[i], hk.slen[i]] end
+        i += 1
+    end
+    return []
 end
