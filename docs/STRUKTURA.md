@@ -1,9 +1,10 @@
 # Struktura projektu LegendaryOS
 
-`legendaryos-builder` buduje **wyłącznie** projekty o poniższej,
-dokładnej strukturze. `legendaryos-builder validate <ścieżka>` sprawdza
-każdy z poniższych punktów i wypisuje pełną listę braków na raz (nie
-przerywa na pierwszym błędzie).
+`legendaryos-builder` buduje **wyłącznie** projekty o poniższej strukturze.
+`legendaryos-builder validate <ścieżka>` sprawdza każdy punkt i wypisuje pełną
+listę problemów na raz (nie przerywa na pierwszym błędzie). Problemy w
+`config.hk`/`user.hk` są pokazywane przez **nidus** — z fragmentem pliku i
+podświetlonym miejscem błędu.
 
 ```
 moj-projekt/
@@ -14,86 +15,116 @@ moj-projekt/
 │   ├── logo.png          wymagany
 │   └── notext-bg.png     wymagany
 ├── scripts/
-│   └── *.hl               WYŁĄCZNIE pliki .hl (Hacker Lang) -- żaden inny
-│                           format (.sh, .bash, .py, ...) nie jest dozwolony
-├── files/                  nakładka "after packages" -- kopiowana 1:1
-│                           do systemu plików obrazu (odpowiednik
-│                           includes.chroot_after_packages w live-build)
+│   └── *.hl               WYŁĄCZNIE pliki .hl (Hacker Lang)
+├── files/                  nakładka "after packages", kopiowana 1:1 do obrazu
+├── package-lists/          (opcjonalnie) własne *.list.chroot / *.list.binary
 ├── build.hl                opis kroków budowy, w Hacker Lang
-├── config.hk                metadane projektu i wydania
-└── user.hk                    organizacja + token uwierzytelniający
+├── config.hk               metadane projektu i wydania
+└── user.hk                 organizacja + token uwierzytelniający
 ```
 
 ## `branding/`
 
-Pięć plików, dokładnie tymi nazwami. Każdy ma swoje jedno, ustalone
-przeznaczenie w finalnym obrazie (patrz `src/branding.h#`):
+Pięć plików, dokładnie tymi nazwami. Walidacja sprawdza nagłówek (PNG:
+sygnatura, JPEG: `ffd8ff`) i ostrzega przy grafikach mniejszych niż 64 px
+(placeholdery).
 
-| Plik              | Gdzie trafia                                             | Uwagi |
-|-------------------|-----------------------------------------------------------|-------|
-| `logo.png`        | `usr/share/legendaryos/branding/logo.png`                  | z przezroczystością |
-| `logo-bg.png`      | panel boczny Calamares (`etc/calamares/branding/...`)        | z pełnym tłem |
-| `logo-bg.jpg`      | tło menu GRUB                                                 | JPEG celowo -- GRUB źle radzi sobie z przezroczystością PNG w tle |
-| `notext-bg.png`    | znak wodny Plymouth (ekran startowy)                          | bez tekstu, żeby działał na dowolnym tle |
-| `banner.png`       | ekran powitalny instalatora (Calamares `show.png`)              | szeroki format, patrz przykład |
+| Plik | Gdzie trafia (komputer) | Uwagi |
+|---|---|---|
+| `logo.png` | `usr/share/legendaryos/branding/` | z przezroczystością |
+| `logo-bg.png` | panel boczny Calamares; splash isolinux/grub-pc | z pełnym tłem |
+| `logo-bg.jpg` | tło menu GRUB (`/etc/default/grub.d/legendaryos.cfg`) | JPEG — GRUB źle radzi sobie z przezroczystością PNG |
+| `notext-bg.png` | znak wodny Plymouth | bez tekstu |
+| `banner.png` | ekran powitalny Calamares (`show.png`, slideshow) | szeroki format |
 
-`legendaryos-builder new` tworzy te pliki jako minimalne, ale
-**prawdziwe i poprawne** obrazy 1×1 px (nie puste atrapy) -- projekt od
-razu przechodzi walidację; podmień je na docelową grafikę przed
-właściwym buildem.
+Dla telefonów: Plymouth + surowe kopie w `usr/share/legendaryos/branding/`
+(Calamares i GRUB nie są instalowane).
+
+Builder **generuje** też pliki aktywujące branding: `branding.desc` i
+`show.qml` (Calamares), `legendaryos.plymouth` + `.script` (kolor tła z
+`[branding] -> background`), konfigurację GRUB oraz hook chroot
+`hooks/live/0900-legendaryos-branding.hook.chroot` (natywny format
+live-build; jedyny plik z shellem i jest generowany — skrypty projektu
+nadal muszą być `.hl`).
 
 ## `scripts/*.hl`
 
-Jedyny dozwolony język hooków after-packages to **Hacker Lang**.
-Żadnego shella, żadnego Pythona. Powód jest ten sam, dla którego
-Hacker Lang w ogóle istnieje w HackerOS: to "alternatywa do pisania
-skryptów w shellu" -- ustandaryzowana kontrola błędów (`? ok` / `? err`),
-bez niejawnego `set -e`, bez cichego kontynuowania po nieudanym poleceniu.
-
-Skrypty uruchamiane są w kolejności alfabetycznej -- konwencja
-`00-`, `10-`, `20-...` w nazwach plików porządkuje kolejność wykonania
-w czytelny sposób (patrz `examples/legendaryos-demo/scripts/`).
+Jedyny dozwolony język hooków to **Hacker Lang**. Skrypty uruchamiane są
+**przed** złożeniem nakładki, w kolejności alfabetycznej (`00-`, `10-`,
+`20-`…), z korzeniem projektu jako katalogiem roboczym — więc to, co
+skrypt zapisze w `files/`, trafi do obrazu. Dostają zmienne
+`LEGENDARYOS_ROOT` i `LEGENDARYOS_BUILD`. Sukces = kod wyjścia `hl` 0;
+`--keep-going` nie przerywa po pierwszym błędzie.
 
 ## `files/`
 
-Zwykłe drzewo katalogów kopiowane 1:1 do obrazu, np.
-`files/etc/os-release` trafia jako `/etc/os-release` w gotowym systemie.
-Może być puste (musi tylko istnieć).
+Zwykłe drzewo katalogów kopiowane 1:1 do obrazu (`files/etc/motd` →
+`/etc/motd`). Kopiowane **ostatnie**, więc nadpisuje wszystko, co
+wygenerował builder (os-release, motd…) i zaimportowało z bazy.
 
-## `build.hl`
+## `package-lists/`
 
-Skrypt Hacker Lang opisujący pełny pipeline builda tego konkretnego
-projektu: `stage` → `run-scripts` → `lb-config` → `lb-build` (te cztery
-etapy odpowiadają czterem niskopoziomowym komendom
-`legendaryos-builder`, patrz `README.adoc`). `legendaryos-builder new`
-generuje gotowy, działający `build.hl` -- zwykle nie trzeba go ręcznie
-edytować, chyba że chcesz dodać własne etapy pośrednie.
+Opcjonalne własne listy live-build. Trafiają obok wygenerowanej
+`legendaryos-base.list.chroot` i list zaimportowanych z bazy HackerOS.
 
 ## `config.hk`
 
 ```
 [project]
--> name    => moj-projekt
--> tag     => stable
--> arch    => amd64
+-> name        => moj-projekt
+-> tag         => stable
+-> version     => 1.0
+-> targets     => [pc:amd64, pc:arm64, phone:arm64:pinephone]
 
 [release]
--> base     => hackeros
--> base-ref => official
--> suite    => trixie
+-> base        => hackeros
+-> base-ref    => official          ;; gałąź/tag bazy HackerOS
+-> base-url    => https://github.com/HackerOS-Linux-System/HackerOS.git
+-> suite       => trixie
 
 [branding]
 -> distro-name => MojProjekt
--> theme       => legendary-gold
+-> accent      => #6236B0
+-> background  => #120C1E
+-> home-url    => https://example.org
+-> support-url => https://example.org/support
+-> bug-url     => https://example.org/bugs
 
 [build]
--> mode     => live-build
--> iso-name => MojProjekt
+-> mode         => live-build
+-> iso-name     => MojProjekt       ;; bez spacji i '/'
+-> volume-label => MojProjekt       ;; max 32 znaki
+-> publisher    => Moja Organizacja
+-> bootappend   => boot=live components quiet splash
+-> firmware     => true
+
+[packages]
+-> desktop    => xfce               ;; none | xfce | gnome | kde  (komputery)
+-> include    => [vim, htop]
+-> exclude    => [os-prober]
+-> recommends => true
+
+[system]
+-> motd              => Witaj!\nDruga linia
+-> hostname          => legendary
+-> generate-identity => true         ;; os-release, lsb-release, issue...
+
+[base]
+-> import => [package-lists, hooks, includes]
+-> helper => desktop                 ;; zawęża do helpers/desktop/ w repo bazy
+
+[mobile]                             ;; tylko dla celów phone:*
+-> shell       => phosh              ;; phosh | none
+-> rootfs-size => 4096               ;; MiB (domyślnie liczone automatycznie)
+-> cmdline     => quiet
+-> root-label  => LEGENDARY_ROOT
 ```
 
-`[release] -> base` / `base-ref` mówią `legendaryos-builder sync-base`,
-z której gałęzi HackerOS korzystać jako bazy (patrz README.adoc, sekcja
-"Relacja z HackerOS").
+Starszy zapis (`-> arch => [amd64, arm64]`, `[target] -> kind`, `[mobile] -> device`)
+nadal działa, gdy nie ma `targets` — patrz [TARGETS.md](TARGETS.md).
+
+Składnia `.hk`: `-> klucz => wartość`, listy `[a, b]`, komentarze `;;`, `#`
+albo `!`, pod-klucze `-->`. `;;` w cudzysłowie nie jest komentarzem.
 
 ## `user.hk`
 
@@ -106,9 +137,20 @@ z której gałęzi HackerOS korzystać jako bazy (patrz README.adoc, sekcja
 -> token =>
 ```
 
-Celowo **osobny plik** od `config.hk` -- to jedyne miejsce z sekretem
-(token), więc jedyne, które ma sens trzymać poza kontrolą wersji.
-`legendaryos-builder new` od razu dopisuje `user.hk` do
-wygenerowanego `.gitignore`. Pusty token nie blokuje builda lokalnego
-(tylko operacji wymagających uwierzytelnienia wobec organizacji) --
-`validate` zgłasza to jako ostrzeżenie, nie błąd.
+Osobny plik, bo to jedyne miejsce z sekretem. `new` dopisuje go do
+`.gitignore`. Pusty token to ostrzeżenie (nie błąd); alternatywa:
+zmienna `LEGENDARYOS_TOKEN`. Token trafia do `git` wyłącznie przez
+zmienne środowiskowe.
+
+## Co powstaje w `build/`
+
+```
+build/
+├── lb/<kind>-<arch>[-<urządzenie>]/   katalog roboczy live-build (config/, chroot/, build.log)
+└── out/                                 gotowe artefakty
+    ├── <iso-name>-<tag>-<arch>.iso
+    ├── <iso-name>-<tag>-<arch>-<urządzenie>.img.xz
+    ├── <iso-name>-<tag>-<arch>-<urządzenie>.rootfs.tar.xz
+    ├── *.SHA256SUMS
+    └── <iso-name>-<tag>-RELEASE-NOTES.md
+```
