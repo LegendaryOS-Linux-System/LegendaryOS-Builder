@@ -1,0 +1,156 @@
+mod project
+mod hkconf
+mod opts
+mod sh
+mod devices
+
+;; Cel budowy = (architektura, rodzaj: komputer/telefon, urządzenie).
+;; Jeden projekt może budować kilka celów naraz, np. `arch => [amd64, arm64]`.
+
+pub struct Target is
+    pub arch:          string
+    pub kind:          string   ;; "pc" | "phone"
+    pub device:        string   ;; id z devices.h# (tylko phone)
+    pub images:        [string] ;; iso | rootfs-tar | raw-img | android-img
+    pub shell:         string   ;; środowisko telefonu (phosh | none)
+    pub system:        string   ;; live-build: live | normal
+    pub binary_images: string   ;; live-build: iso-hybrid | tar
+    pub bootloaders:   string   ;; live-build: lista (pusta = nie podawaj)
+    pub flavour:       string   ;; wariant jądra Debiana
+    pub qemu_arch:     string   ;; "" = build natywny
+    pub qemu_static:   string
+    pub work_dir:      string   ;; katalog roboczy live-build
+    pub out_dir:       string   ;; gotowe artefakty
+end
+
+;; Architektura hosta w nomenklaturze Debiana.
+pub fn host_arch() -> string is
+    let d: string = sh::capture("dpkg --print-architecture 2>/dev/null")
+    if d != "" is return d end
+    let m: string = sh::capture("uname -m")
+    if m == "x86_64" is return "amd64" end
+    if m == "aarch64" || m == "arm64" is return "arm64" end
+    if m == "armv7l" is return "armhf" end
+    if m == "i686" || m == "i386" is return "i386" end
+    return m
+end
+
+pub fn flavour_for(arch: string) -> string is
+    if arch == "arm64" is return "arm64" end
+    if arch == "armhf" is return "armmp" end
+    if arch == "i386" is return "686-pae" end
+    return "amd64"
+end
+
+pub fn qemu_static_for(arch: string) -> string is
+    if arch == "arm64" is return "/usr/bin/qemu-aarch64-static" end
+    if arch == "armhf" is return "/usr/bin/qemu-arm-static" end
+    if arch == "amd64" is return "/usr/bin/qemu-x86_64-static" end
+    return ""
+end
+
+;; Czy dla (host -> cel) potrzebna jest emulacja qemu-user?
+;; amd64 hostuje i386 natywnie; reszta różnych par wymaga qemu.
+pub fn needs_qemu(host: string, arch: string) -> bool is
+    if host == arch is return false end
+    if host == "amd64" && arch == "i386" is return false end
+    if host == "arm64" && arch == "armhf" is return false end
+    return true
+end
+
+fn default_images(kind: string, boot: string) -> [string] is
+    if kind == "pc" is return ["iso"] end
+    if boot == "android" is return ["android-img"] end
+    return ["raw-img"]
+end
+
+fn image_fits(kind: string, img: string) -> bool is
+    if kind == "pc" is return img == "iso" || img == "rootfs-tar" end
+    return img != "iso"
+end
+
+;; Zbuduj Target dla konkretnej trójki (rodzaj, architektura, urządzenie).
+;; `host` podajemy z zewnątrz (testowalność bez dpkg).
+pub fn make(p: project::Project, o: opts::Options, kind: string, arch: string, dev_id: string, host: string) -> Target is
+    let dev: devices::Device = devices::find(dev_id)
+    let cfg_images: [string] = hkconf::get_list(p.config, "target", "image")
+    let mut images: [string] = []
+    let mut k: int = 0
+    while k < array_len(cfg_images) is
+        if image_fits(kind, cfg_images[k]) is images.push(cfg_images[k]) end
+        k += 1
+    end
+    if array_len(images) == 0 is images = default_images(kind, dev.boot) end
+
+    let mut system: string = "live"
+    let mut binary: string = "iso-hybrid"
+    let mut boot: string = "grub-efi,syslinux"
+    if kind == "phone" is
+        system = "normal"
+        binary = "tar"
+        boot = ""
+        ;; rootfs-tar jest zawsze potrzebny jako półprodukt
+        if !array_contains(images, "rootfs-tar") is images.push("rootfs-tar") end
+    else is
+        if arch == "arm64" || arch == "armhf" is boot = "grub-efi" end
+        if arch == "i386" is boot = "syslinux" end
+    end
+
+    let mut qarch: string = ""
+    let mut qstatic: string = ""
+    if needs_qemu(host, arch) is
+        qarch = arch
+        ;; binarka qemu-user-static dla ARCHITEKTURY CELU (host ją emuluje)
+        qstatic = qemu_static_for(arch)
+    end
+
+    let mut dir_name: string = kind + "-" + arch
+    if dev_id != "" is dir_name = dir_name + "-" + dev_id end
+    let work: string = path_join(path_join(project::build_dir(p), "lb"), dir_name)
+    return Target {
+        arch: arch, kind: kind, device: dev_id, images: images,
+        shell: hkconf::get_or(p.config, "mobile", "shell", "phosh"),
+        system: system, binary_images: binary, bootloaders: boot,
+        flavour: flavour_for(arch), qemu_arch: qarch, qemu_static: qstatic,
+        work_dir: work, out_dir: path_join(project::build_dir(p), "out"),
+    }
+end
+
+;; Wszystkie cele projektu, po zastosowaniu filtrów --target / --arch.
+;;  1. [project] -> targets => [pc:amd64, phone:arm64:pinephone, ...]   (zalecane)
+;;  2. wstecznie: [project] -> arch (lista) + [target] -> kind + [mobile] -> device
+pub fn resolve_all(p: project::Project, o: opts::Options, host: string) -> [Target] is
+    let mut out: [Target] = []
+    let specs: [string] = hkconf::get_list(p.config, "project", "targets")
+    if array_len(specs) > 0 is
+        let mut i: int = 0
+        while i < array_len(specs) is
+            let sp: [string] = devices::parse_spec(specs[i])
+            if array_len(sp) == 3 is
+                let wanted_spec: bool = o.target == "" || o.target == specs[i] || o.target == sp[0]
+                let wanted_arch: bool = o.arch == "" || o.arch == sp[1]
+                if wanted_spec && wanted_arch is
+                    out.push(make(p, o, sp[0], sp[1], sp[2], host))
+                end
+            end
+            i += 1
+        end
+        return out
+    end
+    let kind: string = hkconf::get_or(p.config, "target", "kind", "pc")
+    let dev: string = hkconf::get(p.config, "mobile", "device")
+    let arches: [string] = project::arches(p, o)
+    let mut j: int = 0
+    while j < array_len(arches) is
+        if o.target == "" || o.target == kind is
+            out.push(make(p, o, kind, arches[j], dev, host))
+        end
+        j += 1
+    end
+    return out
+end
+
+pub fn label(t: Target) -> string is
+    if t.kind == "phone" is return t.arch + " / telefon (" + t.device + ")" end
+    return t.arch + " / komputer"
+end
