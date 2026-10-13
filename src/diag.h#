@@ -1,0 +1,56 @@
+use "bit -> nidus" from "nidus"
+
+mod project
+mod hkconf
+
+;; Ładne raporty błędów config.hk / user.hk przez bibliotekę nidus:
+;; fragment źródła, podświetlony klucz/wartość, kod błędu, wskazówka.
+;; Style (graphical/ascii/minimal/json/github) dobiera nidus sam
+;; (NIDUS_STYLE, GITHUB_ACTIONS, NO_COLOR, TERM...).
+
+fn source_for(p: project::Project, file: string) -> string is
+    if file == "config.hk" is return p.config.text end
+    if file == "user.hk" is return p.user.text end
+    return ""
+end
+
+pub fn to_diagnostic(p: project::Project, it: project::Issue) -> nidus::diagnostic::Diagnostic is
+    let mut d: nidus::diagnostic::Diagnostic = nidus::warning(it.message)
+    if it.is_error is d = nidus::error(it.message) end
+    d = d.with_code("legendaryos::" + it.code)
+    let src: string = source_for(p, it.file)
+    if it.file != "" && src != "" && it.off >= 0 is
+        d = d.with_source(it.file, src)
+        d = d.with_label(nidus::primary_label(it.off, it.len, it.label))
+    end
+    if it.help != "" is d = d.with_help(it.help) end
+    return d
+end
+
+;; Wypisz wszystkie problemy: najpierw błędy, potem ostrzeżenia, na końcu
+;; podsumowanie (np. "2 błędy, 1 ostrzeżenie").
+pub fn print_issues(p: project::Project, v: project::ValidationResult) is
+    let mut ds: [nidus::diagnostic::Diagnostic] = []
+    let mut pass: int = 0
+    while pass < 2 is
+        let want_error: bool = pass == 0
+        let mut i: int = 0
+        while i < array_len(v.issues) is
+            if v.issues[i].is_error == want_error is
+                ds.push(to_diagnostic(p, v.issues[i]))
+            end
+            i += 1
+        end
+        pass += 1
+    end
+    if array_len(ds) > 0 is
+        nidus::print_all(ds, nidus::config_default())
+    end
+end
+
+;; Ustaw środowisko nidus zgodnie z --no-color.
+pub fn setup(no_color: bool) is
+    if no_color is
+        env_set("NIDUS_COLOR", "never")
+    end
+end
