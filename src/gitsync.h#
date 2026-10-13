@@ -1,83 +1,174 @@
-use "bytes -> git"   from "git"
-use "std -> fs"      from "fs"
-use "std -> path"    from "path"
-use "std -> env"     from "env"
-use "std -> process" from "proc"
+mod sh
+mod ui
+
+;; Baza HackerOS: lokalne lustro + migawka per-build.
+;;
+;; Całość idzie przez systemowy `git`. (Biblioteka hgit nie ma transportu
+;; sieciowego, a jej API nie jest częścią tego repozytorium -- patrz
+;; CHANGELOG.md 0.7.0. Cała praca z gitem jest zamknięta w TYM module,
+;; więc podmiana backendu nie dotyka reszty kodu.)
 
 pub fn cache_dir() -> string is
-    return path::join(env::home(), ".cache/legendaryos-builder")
+    let over: string = env_get("LEGENDARYOS_CACHE")
+    if over != "" is return over end
+    return path_join(env_home(), ".cache/legendaryos-builder")
 end
 
 pub fn mirror_dir() -> string is
-    return path::join(cache_dir(), "hackeros-base")
+    return path_join(cache_dir(), "hackeros-base")
 end
 
-;; Krok 1/2 (jedyny, który NIE idzie przez hgit): sprowadź/uaktualnij
-;; lokalne lustro HackerOS przez systemowy `git`, bo to jedyny transport
-;; sieciowy, jaki mamy do dyspozycji.
-pub fn bootstrap_mirror(url: string, ref_name: string) -> bool is
-    fs::mkdir(cache_dir())
-    if proc::which("git") == "" is
-        write("  \x1b[31m✘\x1b[0m nie znaleziono systemowego `git` -- potrzebny " +
-              "tylko do jednorazowego pobrania (hgit nie ma transportu sieciowego)")
+pub fn mirror_exists() -> bool is
+    return fs_is_dir(path_join(mirror_dir(), ".git"))
+end
+
+;; Token (jeśli jest) przekazujemy gitowi przez zmienne środowiskowe
+;; GIT_CONFIG_* -- NIGDY w linii poleceń (widocznej w `ps`) ani w URL-u
+;; (zapisywanym w .git/config).
+fn export_auth(token: string) is
+    env_set("GIT_TERMINAL_PROMPT", "0")
+    if token == "" is return end
+    env_set("LEGENDARYOS_TOKEN", token)
+    let b64: string = sh::capture("printf '%s' \"x-access-token:$LEGENDARYOS_TOKEN\" | base64 -w0")
+    env_set("GIT_CONFIG_COUNT", "1")
+    env_set("GIT_CONFIG_KEY_0", "http.extraheader")
+    env_set("GIT_CONFIG_VALUE_0", "Authorization: Basic " + b64)
+end
+
+fn git_in(dir: string, args: string) -> int is
+    return sh::run("git -C " + sh::sq(dir) + " " + args)
+end
+
+;; Jedyny krok sieciowy: sprowadź/uaktualnij lustro. Zwraca true tylko gdy
+;; wszystkie komendy git zakończyły się sukcesem.
+pub fn bootstrap_mirror(url: string, ref_name: string, token: string) -> bool is
+    sh::mkdir_p(cache_dir())
+    if !sh::tool_exists("git") is
+        ui::fail("nie znaleziono systemowego `git` -- potrzebny do pobrania bazy HackerOS")
         return false
     end
-
-    if fs::is_dir(path::join(mirror_dir(), ".git")) is
-        write("  → aktualizuję lokalne lustro " + mirror_dir())
-        proc::run_args("git", ["-C", mirror_dir(), "fetch", "--all", "--tags"])
-        proc::run_args("git", ["-C", mirror_dir(), "checkout", ref_name])
-        proc::run_args("git", ["-C", mirror_dir(), "pull", "--ff-only"])
-    else is
-        write("  → klonuję " + url + " (gałąź " + ref_name + ") do " + mirror_dir())
-        proc::run_args("git", ["clone", "--branch", ref_name, "--single-branch", url, mirror_dir()])
-    end
-
-    return fs::is_dir(path::join(mirror_dir(), ".git"))
-end
-
-;; Krok 2/2 -- WYŁĄCZNIE hgit od tego miejsca w dół: zrób lokalną,
-;; wersjonowaną kopię roboczą lustra dla danego builda projektu (żeby
-;; jeden build nigdy nie mutował współdzielonego lustra pod stopami
-;; drugiego, równoległego builda).
-pub fn snapshot_base(dest_dir: string) -> bool is
-    if fs::exists(dest_dir) is
-        fs::rmdir_all(dest_dir)
-    end
-
-    let result = hgit::clone::clone(mirror_dir(), dest_dir)
-    match result is
-        hgit::error::GitResult::Err(e) => is
-            write("  \x1b[31m✘\x1b[0m hgit::clone nie powiódł się: " + e.to_string())
+    export_auth(token)
+    let dir: string = mirror_dir()
+    if mirror_exists() is
+        ui::info("aktualizuję lustro " + dir + " (ref: " + ref_name + ")")
+        ;; gałąź (refspec) -- może nie istnieć, jeśli ref to tag: wtedy zadziała --tags
+        git_in(dir, "fetch --prune origin " + sh::sq("+refs/heads/" + ref_name + ":refs/remotes/origin/" + ref_name) + " >/dev/null 2>&1")
+        if git_in(dir, "fetch --prune --tags origin") != 0 is
+            ui::fail("git fetch nie powiódł się (sieć? token?)")
             return false
         end
-        hgit::error::GitResult::Ok(repo) => is
-            write("  \x1b[32m✔\x1b[0m lokalna kopia bazy HackerOS gotowa: " + repo.workdir())
-            return true
+        if git_in(dir, "checkout -q --detach " + sh::sq("origin/" + ref_name) + " 2>/dev/null") != 0 is
+            if git_in(dir, "checkout -q --detach " + sh::sq(ref_name)) != 0 is
+                ui::fail("nie ma gałęzi ani tagu '" + ref_name + "' w " + url)
+                return false
+            end
         end
+        return true
     end
+    ui::info("klonuję " + url + " (ref: " + ref_name + ") do " + dir)
+    let rc: int = sh::run("git clone -q --branch " + sh::sq(ref_name) + " --single-branch --depth 200 " + sh::sq(url) + " " + sh::sq(dir))
+    if rc != 0 is
+        ui::fail("git clone nie powiódł się (sieć? nazwa ref? token?)")
+        return false
+    end
+    return true
 end
 
-;; Krótki changelog bazy (przez hgit::porcelain::log) -- przydatny w
-;; release notes danego builda LegendaryOS ("zbudowano na bazie HackerOS
-;; @ <ostatnie N commitów>").
-pub fn base_log(dest_dir: string, limit: int) -> [string] is
-    let opened = hgit::repository::open(dest_dir)
-    match opened is
-        hgit::error::GitResult::Err(_) => is
-            return []
+;; Migawka lustra dla jednego builda -- w 100% lokalnie, bez sieci. Jeden
+;; build nigdy nie mutuje współdzielonego lustra pod stopami drugiego.
+pub fn snapshot_base(dest_dir: string) -> bool is
+    if !mirror_exists() is
+        ui::fail("brak lokalnego lustra bazy -- uruchom: legendaryos-builder sync-base")
+        return false
+    end
+    sh::rm_rf(dest_dir)
+    sh::mkdir_p(path_parent(dest_dir))
+    let rc: int = sh::run("git clone -q --local --no-hardlinks " + sh::sq(mirror_dir()) + " " + sh::sq(dest_dir))
+    if rc != 0 is
+        ui::fail("nie udało się zrobić migawki bazy z " + mirror_dir())
+        return false
+    end
+    return true
+end
+
+;; "abc1234 2026-10-01 treść ostatniego commita" albo "".
+pub fn head_info(dir: string) -> string is
+    return sh::capture("git -C " + sh::sq(dir) + " log -1 --format='%h %cs %s' 2>/dev/null")
+end
+
+pub fn head_hash(dir: string) -> string is
+    return sh::capture("git -C " + sh::sq(dir) + " rev-parse --short HEAD 2>/dev/null")
+end
+
+;; Ostatnie `limit` commitów bazy (do release notes).
+pub fn base_log(dir: string, limit: int) -> [string] is
+    let out: string = sh::capture("git -C " + sh::sq(dir) + " log --oneline -n " + to_string(limit) + " 2>/dev/null")
+    let mut lines: [string] = []
+    if out == "" is return lines end
+    let parts: [string] = string_split(out, "\n")
+    let mut i: int = 0
+    while i < array_len(parts) is
+        if string_trim(parts[i]) != "" is lines.push(string_trim(parts[i])) end
+        i += 1
+    end
+    return lines
+end
+
+;; Zlicz pliki pasujące do `find`-a (do raportu importu).
+fn count_lines(s: string) -> int is
+    if s == "" is return 0 end
+    return array_len(string_split(s, "\n"))
+end
+
+;; Import wybranych elementów bazy do nakładki live-build (`cfg_dir` =
+;; katalog "config" w stylu live-build). Co importować, mówi
+;; [base] -> import (domyślnie: package-lists); opcjonalny [base] -> helper
+;; zawęża szukanie do helpers/<helper>/ (układ repo HackerOS).
+;; Zwraca liczbę zaimportowanych plików.
+pub fn import_base(snapshot: string, cfg_dir: string, what: [string], helper: string) -> int is
+    let mut root: string = snapshot
+    if helper != "" is root = path_join(path_join(snapshot, "helpers"), helper) end
+    if !fs_is_dir(root) is
+        ui::warn("baza: nie znaleziono " + root + " -- pomijam import")
+        return 0
+    end
+    let mut total: int = 0
+
+    if array_contains(what, "package-lists") is
+        let found: string = sh::capture("find " + sh::sq(root) + " -type f \\( -name '*.list.chroot' -o -name '*.list.binary' \\) -path '*package-lists*' -not -path '*/.git/*' | sort")
+        let n: int = count_lines(found)
+        if n > 0 is
+            sh::mkdir_p(path_join(cfg_dir, "package-lists"))
+            sh::run("find " + sh::sq(root) + " -type f \\( -name '*.list.chroot' -o -name '*.list.binary' \\) -path '*package-lists*' -not -path '*/.git/*' " +
+                    "-exec sh -c 'for f; do cp -f \"$f\" \"$0/hackeros-$(basename \"$f\")\"; done' " + sh::sq(path_join(cfg_dir, "package-lists")) + " {{}} +")
         end
-        hgit::error::GitResult::Ok(repo) => is
-            let logged = hgit::porcelain::log(repo)
-            match logged is
-                hgit::error::GitResult::Err(_) => is
-                    return []
+        total = total + n
+    end
+
+    if array_contains(what, "hooks") is
+        let found: string = sh::capture("find " + sh::sq(root) + " -type f -name '*.hook.chroot' -not -path '*/.git/*' | sort")
+        let n: int = count_lines(found)
+        if n > 0 is
+            sh::mkdir_p(path_join(cfg_dir, "hooks/live"))
+            sh::run("find " + sh::sq(root) + " -type f -name '*.hook.chroot' -not -path '*/.git/*' " +
+                    "-exec sh -c 'for f; do cp -f \"$f\" \"$0/hackeros-$(basename \"$f\")\"; done' " + sh::sq(path_join(cfg_dir, "hooks/live")) + " {{}} +")
+        end
+        total = total + n
+    end
+
+    if array_contains(what, "includes") is
+        let dirs: string = sh::capture("find " + sh::sq(root) + " -type d -name 'includes.chroot*' -not -path '*/.git/*' | sort")
+        if dirs != "" is
+            let parts: [string] = string_split(dirs, "\n")
+            let mut i: int = 0
+            while i < array_len(parts) is
+                if parts[i] != "" is
+                    sh::copy_tree(parts[i], path_join(cfg_dir, "includes.chroot_after_packages"))
+                    total = total + count_lines(sh::capture("find " + sh::sq(parts[i]) + " -type f"))
                 end
-                hgit::error::GitResult::Ok(lines) => is
-                    if lines.len() <= limit is return lines end
-                    return lines[0..limit]
-                end
+                i += 1
             end
         end
     end
+    return total
 end
