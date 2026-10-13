@@ -1,0 +1,68 @@
+use "bit -> colors"
+
+;; Cała warstwa wizualna CLI w jednym miejscu -- reszta kodu woła tylko
+;; ui::*, nigdy ręcznych sekwencji ANSI. Kolory pochodzą z biblioteki
+;; `colors` (auto-wykrywanie terminala, NO_COLOR, degradacja do 256/16).
+
+pub fn setup(no_color: bool) is
+    if no_color is colors::disable() end
+end
+
+pub fn rule(width: int) -> string is
+    return colors::paint(string_repeat("─", width), "slate")
+end
+
+
+pub fn banner(version: string) -> string is
+    let mut out: string = "\n"
+    out = out + "  " + colors::bold(colors::gradient::text3("LegendaryOS-Builder", "#8e2de2", "#c471ed", "gold"))
+    out = out + " " + colors::theme::muted("v" + version) + "\n"
+    out = out + "  " + colors::theme::muted("nakładka na live-build dla LegendaryOS (baza: HackerOS)") + "\n"
+    out = out + "  " + colors::gradient::text3(string_repeat("━", 50), "#8e2de2", "#c471ed", "#f7971e") + "\n"
+    return out
+end
+
+pub fn title(msg: string) is
+    write("")
+    write("  " + colors::theme::title(msg))
+end
+
+pub fn ok(msg: string) is write("  " + colors::theme::success(msg)) end
+pub fn fail(msg: string) is write("  " + colors::theme::error(msg)) end
+pub fn warn(msg: string) is write("  " + colors::theme::warning(msg)) end
+pub fn info(msg: string) is write("  " + colors::theme::info(msg)) end
+pub fn hint(msg: string) is write("  " + colors::theme::hint(msg)) end
+pub fn debug(msg: string) is write("  " + colors::theme::debug(msg)) end
+pub fn muted(msg: string) is write("  " + colors::theme::muted(msg)) end
+pub fn plain(msg: string) is write(msg) end
+pub fn blank() is write("") end
+
+pub fn step(n: int, total: int, msg: string) is
+    write("  " + colors::theme::step(n, total, msg))
+end
+
+;; "klucz   wartość" z wyrównaniem kluczy.
+pub fn kv(key: string, val: string) is
+    write("  " + colors::theme::key(colors::util::pad_right(key, 16)) + " " + val)
+end
+
+;; Wiersz pomocy: komenda + opis.
+pub fn cmd_row(cmd: string, desc: string) is
+    write("  " + colors::bold(colors::paint(colors::util::pad_right(cmd, 24), "gold")) + colors::theme::muted(desc))
+end
+
+pub fn flag_row(flag: string, desc: string) is
+    write("  " + colors::paint(colors::util::pad_right(flag, 24), "mediumpurple") + colors::theme::muted(desc))
+end
+
+pub fn code(s: string) -> string is
+    return colors::theme::code(s)
+end
+
+pub fn level_name() -> string is
+    return colors::support::level_name()
+end
+
+pub fn ok_badge() -> string is return colors::theme::ok_badge() end
+pub fn fail_badge() -> string is return colors::theme::fail_badge() end
+pub fn warn_badge() -> string is return colors::theme::warn_badge() end
