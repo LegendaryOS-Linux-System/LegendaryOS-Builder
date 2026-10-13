@@ -1,0 +1,104 @@
+pub struct Device is
+    pub id:        string
+    pub name:      string
+    pub arch:      string
+    pub boot:      string
+    pub blobs:     [string]
+    pub packages:  [string]   ;; dodatkowe pakiety dla tego urządzenia
+    pub console:   string     ;; np. "ttyS0,115200" (pusty = brak)
+    pub cmdline:   string     ;; dodatkowe parametry jądra
+    pub pagesize:  int        ;; tylko android
+    pub header:    int        ;; tylko android (mkbootimg --header_version)
+    pub notes:     string
+end
+
+pub fn none() -> Device is
+    return Device { id: "", name: "", arch: "", boot: "", blobs: [], packages: [],
+                    console: "", cmdline: "", pagesize: 0, header: 0, notes: "" }
+end
+
+pub fn all() -> [Device] is
+    return [
+        Device {
+            id: "generic-arm64", name: "Generic ARM64 (UEFI: SBSA, VM, laptopy ARM)",
+            arch: "arm64", boot: "uefi", blobs: [],
+            packages: ["grub-efi-arm64"], console: "", cmdline: "",
+            pagesize: 0, header: 0,
+            notes: "ISO hybrydowa z GRUB-EFI; surowy obraz niepotrzebny",
+        },
+        Device {
+            id: "pinephone", name: "PINE64 PinePhone (Allwinner A64)",
+            arch: "arm64", boot: "u-boot",
+            blobs: ["/usr/lib/u-boot/pinephone/u-boot-sunxi-with-spl.bin@16"],
+            packages: ["u-boot-sunxi", "eg25-manager", "u-boot-tools"],
+            console: "ttyS0,115200", cmdline: "",
+            pagesize: 0, header: 0,
+            notes: "U-Boot SPL na sektorze 16 (8 KiB)",
+        },
+        Device {
+            id: "pinephone-pro", name: "PINE64 PinePhone Pro (Rockchip RK3399S)",
+            arch: "arm64", boot: "u-boot",
+            blobs: ["/usr/lib/u-boot/pinephone-pro-rk3399/idbloader.img@64",
+                    "/usr/lib/u-boot/pinephone-pro-rk3399/u-boot.itb@16384"],
+            packages: ["u-boot-rockchip", "eg25-manager", "u-boot-tools"],
+            console: "ttyS2,1500000", cmdline: "",
+            pagesize: 0, header: 0,
+            notes: "idbloader.img @64, u-boot.itb @16384",
+        },
+        Device {
+            id: "librem5", name: "Purism Librem 5 (NXP i.MX8M)",
+            arch: "arm64", boot: "u-boot",
+            blobs: ["/usr/lib/u-boot/librem5/flash.bin@66"],
+            packages: ["u-boot-imx", "u-boot-tools"],
+            console: "ttymxc0,115200", cmdline: "",
+            pagesize: 0, header: 0,
+            notes: "flash.bin @66 (33 KiB) -- zweryfikuj z dokumentacją Purism",
+        },
+        Device {
+            id: "android-arm64", name: "Telefony z Androida (fastboot, EKSPERYMENTALNE)",
+            arch: "arm64", boot: "android", blobs: [],
+            packages: ["android-sdk-libsparse-utils", "mkbootimg"],
+            console: "", cmdline: "",
+            pagesize: 4096, header: 2,
+            notes: "boot.img + rootfs.img do wgrania przez fastboot; wymaga dopasowania jądra/dtb do modelu",
+        },
+    ]
+end
+
+pub fn ids() -> [string] is
+    let list: [Device] = all()
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(list) is
+        out.push(list[i].id)
+        i += 1
+    end
+    return out
+end
+
+;; Znajdź profil po id; nieznany -> none() (id == "").
+pub fn find(id: string) -> Device is
+    let list: [Device] = all()
+    let mut i: int = 0
+    while i < array_len(list) is
+        if list[i].id == id is return list[i] end
+        i += 1
+    end
+    return none()
+end
+
+;; "pc:amd64" | "pc:arm64" | "phone:arm64:pinephone"  ->  [kind, arch, device]
+;; albo [] gdy zapis jest niepoprawny.
+pub fn parse_spec(spec: string) -> [string] is
+    let parts: [string] = string_split(string_trim(spec), ":")
+    let n: int = array_len(parts)
+    if n < 2 || n > 3 is return [] end
+    let kind: string = string_trim(parts[0])
+    let arch: string = string_trim(parts[1])
+    if kind != "pc" && kind != "phone" is return [] end
+    if arch == "" is return [] end
+    if kind == "phone" && n != 3 is return [] end
+    if kind == "pc" && n != 2 is return [] end
+    if n == 3 is return [kind, arch, string_trim(parts[2])] end
+    return [kind, arch, ""]
+end
