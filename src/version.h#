@@ -1,5 +1,5 @@
 pub fn name() -> string is return "LegendaryOS-Builder" end
-pub fn version() -> string is return "0.7.0" end
+pub fn version() -> string is return "0.8.0" end
 pub fn bin_name() -> string is return "legendaryos-builder" end
 
 ;; Organizacja/repo, z którego LegendaryOS dziedziczy bazowy system
@@ -18,3 +18,30 @@ end
 pub fn known_suites() -> [string] is
     return ["bookworm", "trixie", "forky", "sid", "stable", "testing", "unstable"]
 end
+
+;; Bazy systemu: `hackeros` = klasyczny LegendaryOS (Debian testing przez
+;; live-build), `fedora` = LegendaryOS na Fedora Silverblue (atomowa; obraz
+;; OCI/bootc -> ISO instalacyjne przez bootc-image-builder).
+pub fn known_bases() -> [string] is
+    return ["hackeros", "fedora"]
+end
+
+pub fn fedora_default_version() -> string is return "44" end
+pub fn fedora_default_image() -> string is return "quay.io/fedora-ostree-desktops/silverblue" end
+pub fn bib_image() -> string is return "quay.io/centos-bootc/bootc-image-builder:latest" end
+
+;; Display manager Blue Environment (domyślny, gdy środowiskiem jest Blue Environment).
+pub fn blue_display_manager() -> string is return "sdm" end
+
+;; Pakiety Blue Environment. Wariant telefoniczny (UI `phones`) jest wariantem
+;; BUDOWY Blue Environment, stąd osobny pakiet -- zmień tu, jeśli nazwa jest inna.
+pub fn blue_desktop_package() -> string is return "blue-environment" end
+pub fn blue_phone_package() -> string is return "blue-environment-phones" end
+
+;; Znaczniki sesji live czytane przez Blue Installer / LegendaryOS.
+;; `.live` -- kontrakt Blue Environment (~/.config/Blue-Environment/.live);
+;; pozostałe -- dodatkowe znaczniki LegendaryOS obok niego.
+pub fn live_marker() -> string is return ".live" end
+pub fn live_marker_legendaryos() -> string is return ".live-legendaryos" end
+pub fn live_marker_fedora() -> string is return ".live-fedora-legendaryos" end
+pub fn live_marker_dir() -> string is return "etc/skel/.config/Blue-Environment" end
