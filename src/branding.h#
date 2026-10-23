@@ -2,6 +2,8 @@ mod project
 mod hkconf
 mod opts
 mod target
+mod opts
+mod systemcfg
 mod sh
 mod text
 
@@ -99,7 +101,7 @@ end
 ;; Hook live-build (natywny format live-build: *.hook.chroot jest
 ;; uruchamiany w chroot; to jedyny plik z shellem, GENEROWANY -- skrypty
 ;; PROJEKTU nadal muszą być .hl).
-pub fn chroot_hook(kind: string) -> string is
+pub fn chroot_hook(kind: string, extra: [string]) -> string is
     let mut o: string = "#!/bin/sh\n# wygenerowane przez legendaryos-builder -- nie edytuj\nset -e\n"
     o = o + "if command -v plymouth-set-default-theme >/dev/null 2>&1 && [ -d /usr/share/plymouth/themes/legendaryos ]; then\n"
     o = o + "    plymouth-set-default-theme legendaryos || true\nfi\n"
@@ -107,12 +109,18 @@ pub fn chroot_hook(kind: string) -> string is
         o = o + "if [ -f /etc/calamares/settings.conf ]; then\n"
         o = o + "    sed -i 's/^branding:.*/branding: legendaryos/' /etc/calamares/settings.conf\nfi\n"
     end
+    let mut i: int = 0
+    while i < array_len(extra) is
+        o = o + extra[i] + "\n"
+        i += 1
+    end
     o = o + "if command -v update-initramfs >/dev/null 2>&1; then update-initramfs -u || true; fi\n"
     return o
 end
 
 ;; Zwraca liczbę wygenerowanych/skopiowanych plików.
-pub fn stage(p: project::Project, t: target::Target, cfg: string) -> int is
+pub fn stage(p: project::Project, o: opts::Options, t: target::Target, cfg: string) -> int is
+    let fedora: bool = project::is_fedora(p, o)
     let b: string = path_join(p.root, "branding")
     let logo: string = path_join(b, "logo.png")
     let logo_bg_png: string = path_join(b, "logo-bg.png")
@@ -135,7 +143,9 @@ pub fn stage(p: project::Project, t: target::Target, cfg: string) -> int is
     sh::write_text(path_join(ov, ply + "/legendaryos.script"), plymouth_script(p))
     let mut n: int = 8
 
-    if t.kind == "pc" is
+    ;; Calamares i GRUB-pc/isolinux dotyczą tylko live-build (hackeros); na Fedorze
+    ;; instalatorem jest Blue Installer / Anaconda, a bootloaderem zarządza bootc.
+    if t.kind == "pc" && !fedora is
         let cal: string = "etc/calamares/branding/legendaryos"
         put(cfg, cal, logo_bg_png, "logo.png")
         put(cfg, cal, banner, "show.png")
@@ -153,8 +163,9 @@ pub fn stage(p: project::Project, t: target::Target, cfg: string) -> int is
         n = n + 9
     end
 
+    if fedora is return n end
     let hook: string = path_join(cfg, "hooks/live/0900-legendaryos-branding.hook.chroot")
-    sh::write_text(hook, chroot_hook(t.kind))
+    sh::write_text(hook, chroot_hook(t.kind, systemcfg::shell_lines(p, o, t.kind, false)))
     sh::run("chmod +x " + sh::sq(hook))
     return n + 1
 end
