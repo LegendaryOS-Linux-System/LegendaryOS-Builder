@@ -13,7 +13,12 @@ pub fn notes_text(p: project::Project, o: opts::Options, targets: [target::Targe
                   produced: [string], base_info: string, base_log: [string]) -> string is
     let mut s: string = "# " + project::distro_name(p) + " " + project::proj_version(p) + " (" + project::tag(p) + ")\n\n"
     s = s + "- Budowa: legendaryos-builder\n"
-    s = s + "- Debian suite: " + project::suite(p, o) + "\n"
+    if project::is_fedora(p, o) is
+        s = s + "- Baza: Fedora Silverblue " + hkconf::get_or(p.config, "fedora", "version", "44") + " (atomowa, bootc)\n"
+    else is
+        s = s + "- Debian suite: " + project::suite(p, o) + "\n"
+    end
+    s = s + "- Środowisko: " + project::desktop(p, o) + "\n"
     let mut labels: [string] = []
     let mut i: int = 0
     while i < array_len(targets) is
