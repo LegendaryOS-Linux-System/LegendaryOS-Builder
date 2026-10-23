@@ -4,6 +4,8 @@ mod opts
 mod sh
 mod devices
 mod target
+mod version
+mod opts
 
 ;; Listy pakietów dla live-build, zależne od celu (komputer/telefon),
 ;; architektury i urządzenia. `package_names` jest czystą funkcją (łatwo
@@ -21,10 +23,30 @@ fn desktop_packages(name: string) -> [string] is
     if name == "xfce" is return ["task-xfce-desktop"] end
     if name == "gnome" is return ["task-gnome-desktop"] end
     if name == "kde" is return ["task-kde-desktop"] end
+    if name == "blue-environment" is return [version::blue_desktop_package()] end
+    return []
+end
+
+;; Pakiet(y) display managera. Nazwa pakietu = nazwa DM (sdm, gdm, sddm...).
+fn display_manager_packages(dm: string) -> [string] is
+    if dm == "" is return [] end
+    return [dm]
+end
+
+;; Pakiety RPM dla bazy Fedora (Silverblue). GNOME jest już w obrazie bazowym.
+pub fn rpm_desktop_packages(name: string) -> [string] is
+    if name == "xfce" is return ["@xfce-desktop-environment"] end
+    if name == "kde" is return ["@kde-desktop-environment"] end
+    if name == "cosmic" is return ["@cosmic-desktop-environment"] end
+    if name == "blue-environment" is return [version::blue_desktop_package()] end
     return []
 end
 
 fn shell_packages(name: string) -> [string] is
+    if name == "blue-environment" is
+        return [version::blue_phone_package(), "squeekboard", "feedbackd", "callaudiod", "gnome-calls",
+                "chatty", "gnome-contacts", "gnome-settings-daemon"]
+    end
     if name == "phosh" is
         return ["phosh", "phoc", "squeekboard", "feedbackd", "callaudiod", "gnome-calls", "chatty",
                 "gnome-contacts", "gnome-settings-daemon"]
@@ -42,14 +64,19 @@ fn append_all(base: [string], extra: [string]) -> [string] is
     return out
 end
 
-pub fn package_names(p: project::Project, t: target::Target) -> [string] is
+pub fn package_names(p: project::Project, o: opts::Options, t: target::Target) -> [string] is
     let mut names: [string] = ["systemd-sysv", "sudo", "network-manager", "locales", "ca-certificates", "plymouth"]
 
     if t.kind == "pc" is
-        names = append_all(names, ["live-boot", "live-config", "live-config-systemd", "calamares",
-                                   "calamares-settings-debian", "plymouth-themes"])
+        names = append_all(names, ["live-boot", "live-config", "live-config-systemd", "plymouth-themes"])
+        if project::uses_blue(p, o, "pc") is
+            ;; instalatorem jest Blue Installer (wbudowany w Blue Environment); wymaga tych narzędzi
+            names = append_all(names, ["rsync", "parted", "dosfstools", "e2fsprogs", "xz-utils"])
+        else is
+            names = append_all(names, ["calamares", "calamares-settings-debian"])
+        end
         names = append_all(names, grub_packages(t.arch))
-        names = append_all(names, desktop_packages(hkconf::get_or(p.config, "packages", "desktop", "none")))
+        names = append_all(names, desktop_packages(project::desktop(p, o)))
     else is
         names = append_all(names, ["initramfs-tools", "e2fsprogs", "dosfstools", "modemmanager", "wpasupplicant",
                                    "iw", "bluez", "openssh-server", "firmware-linux-free"])
@@ -58,6 +85,7 @@ pub fn package_names(p: project::Project, t: target::Target) -> [string] is
         names = append_all(names, dev.packages)
     end
 
+    names = append_all(names, display_manager_packages(project::display_manager(p, o, t.kind)))
     names = append_all(names, hkconf::get_list(p.config, "packages", "include"))
 
     let excl: [string] = hkconf::get_list(p.config, "packages", "exclude")
@@ -70,8 +98,25 @@ pub fn package_names(p: project::Project, t: target::Target) -> [string] is
     return out
 end
 
-pub fn stage(p: project::Project, t: target::Target, cfg_dir: string) -> int is
-    let names: [string] = package_names(p, t)
+;; Lista pakietów dla bazy Fedora: desktop + display manager + [packages] -> include,
+;; minus exclude. Tylko komputery (telefony nie są budowane na Fedorze).
+pub fn rpm_package_names(p: project::Project, o: opts::Options) -> [string] is
+    let mut names: [string] = ["plymouth", "plymouth-scripts", "NetworkManager", "sudo"]
+    names = append_all(names, rpm_desktop_packages(project::desktop(p, o)))
+    names = append_all(names, display_manager_packages(project::display_manager(p, o, "pc")))
+    names = append_all(names, hkconf::get_list(p.config, "packages", "include"))
+    let excl: [string] = hkconf::get_list(p.config, "packages", "exclude")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(names) is
+        if !array_contains(excl, names[i]) is out.push(names[i]) end
+        i += 1
+    end
+    return out
+end
+
+pub fn stage(p: project::Project, o: opts::Options, t: target::Target, cfg_dir: string) -> int is
+    let names: [string] = package_names(p, o, t)
     let mut out: string = "# wygenerowane przez legendaryos-builder (cel: " + t.kind + "/" + t.arch + ")\n"
     let mut i: int = 0
     while i < array_len(names) is
