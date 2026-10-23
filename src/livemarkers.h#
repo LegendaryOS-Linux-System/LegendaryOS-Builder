@@ -1,0 +1,50 @@
+mod project
+mod opts
+mod target
+mod sh
+mod version
+
+;; Znaczniki sesji live dla instalatora Blue Environment.
+;;
+;; Kontrakt Blue Environment (src/lib/utils/liveMode.ts): jeśli istnieje
+;; `~/.config/Blue-Environment/.live`, powłoka pokazuje Blue Installer na
+;; pełnym ekranie zamiast zwykłego pulpitu. Instalator sam usuwa ten plik
+;; z /etc/skel docelowego systemu po instalacji (engine.rs), więc znacznik
+;; kładziemy w /etc/skel -- użytkownik sesji live dostaje go w $HOME.
+;;
+;; Obok `.live` powstają znaczniki LegendaryOS:
+;;   .live-legendaryos          -- zawsze (gdy znaczniki są włączone)
+;;   .live-fedora-legendaryos   -- dodatkowo, gdy baza = Fedora (Silverblue)
+
+;; Nazwy znaczników dla projektu (czysta funkcja -- testowana w selftest).
+pub fn marker_names(p: project::Project, o: opts::Options, t: target::Target) -> [string] is
+    let mut out: [string] = []
+    if !project::live_markers_enabled(p, o, t.kind) is return out end
+    out.push(version::live_marker())
+    out.push(version::live_marker_legendaryos())
+    if project::is_fedora(p, o) is out.push(version::live_marker_fedora()) end
+    return out
+end
+
+fn marker_body(name: string, p: project::Project, o: opts::Options) -> string is
+    let mut s: string = "# znacznik sesji live -- wygenerowany przez legendaryos-builder\n"
+    s = s + "system=" + project::distro_name(p) + "\n"
+    s = s + "base=" + project::base(p, o) + "\n"
+    s = s + "marker=" + name + "\n"
+    return s
+end
+
+;; Zapisz znaczniki do nakładki `cfg` (config live-build albo staging Fedory).
+;; Zwraca liczbę plików.
+pub fn stage(p: project::Project, o: opts::Options, t: target::Target, cfg: string) -> int is
+    let names: [string] = marker_names(p, o, t)
+    let dir: string = path_join(path_join(cfg, "includes.chroot_after_packages"), version::live_marker_dir())
+    let mut i: int = 0
+    while i < array_len(names) is
+        ;; `.live` zostaje pusty jak w oryginalnym kontrakcie (wystarczy samo istnienie pliku)
+        let body: string = if names[i] == version::live_marker() then "" else marker_body(names[i], p, o)
+        sh::write_text(path_join(dir, names[i]), body)
+        i += 1
+    end
+    return array_len(names)
+end
