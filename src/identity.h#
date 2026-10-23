@@ -3,6 +3,7 @@ mod hkconf
 mod opts
 mod sh
 mod text
+mod version
 
 ;; Tożsamość systemu generowana z config.hk: os-release, lsb-release,
 ;; issue, motd, hostname. Pliki z files/ projektu NADPISUJĄ wygenerowane
@@ -23,11 +24,18 @@ pub fn os_release(p: project::Project, o: opts::Options) -> string is
     let mut out: string = ""
     out = out + "PRETTY_NAME=" + q(nm + " " + ver + " (" + tg + ")") + "\n"
     out = out + "NAME=" + q(nm) + "\n"
-    out = out + "VERSION_ID=" + q(ver) + "\n"
+    let fedora: bool = project::is_fedora(p, o)
+    ;; Fedora: VERSION_ID zostaje numerem Fedory (dnf/rpm-ostree liczą na niego $releasever),
+    ;; wersja LegendaryOS idzie do VERSION i LEGENDARYOS_VERSION.
+    out = out + "VERSION_ID=" + q(if fedora then hkconf::get_or(p.config, "fedora", "version", version::fedora_default_version()) else ver) + "\n"
     out = out + "VERSION=" + q(ver + " (" + tg + ")") + "\n"
-    out = out + "VERSION_CODENAME=" + project::suite(p, o) + "\n"
+    if fedora is
+        out = out + "LEGENDARYOS_VERSION=" + q(ver) + "\n"
+    else is
+        out = out + "VERSION_CODENAME=" + project::suite(p, o) + "\n"
+    end
     out = out + "ID=" + text::slug(nm) + "\n"
-    out = out + "ID_LIKE=debian\n"
+    out = out + "ID_LIKE=" + (if fedora then "fedora" else "debian") + "\n"
     out = out + "VARIANT_ID=" + text::slug(tg) + "\n"
     out = out + "HOME_URL=" + q(home) + "\n"
     out = out + "SUPPORT_URL=" + q(sup) + "\n"
