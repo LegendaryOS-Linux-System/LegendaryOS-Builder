@@ -1,0 +1,70 @@
+mod project
+mod hkconf
+mod opts
+mod sh
+
+;; Ustawienia systemu z config.hk ([system] + display manager) zamienione na
+;; krótkie polecenia powłoki. Te same linie trafiają:
+;;   * baza hackeros -> do generowanego hooka chroot live-build,
+;;   * baza fedora   -> do kroków RUN w Containerfile.
+;; Wartości z config.hk są cytowane (sh::sq) -- nic nie trafia do powłoki surowe.
+
+fn unit(name: string) -> string is
+    if string_ends_with(name, ".service") || string_ends_with(name, ".timer") || string_ends_with(name, ".socket") is
+        return name
+    end
+    return name + ".service"
+end
+
+pub fn shell_lines(p: project::Project, o: opts::Options, kind: string, fedora: bool) -> [string] is
+    let mut out: [string] = []
+
+    let locale: string = hkconf::get(p.config, "system", "locale")
+    if locale != "" is
+        if fedora is
+            out.push("printf 'LANG=%s\\n' " + sh::sq(locale) + " > /etc/locale.conf")
+        else is
+            out.push("printf 'LANG=%s\\n' " + sh::sq(locale) + " > /etc/default/locale")
+            out.push("if [ -f /etc/locale.gen ]; then sed -i " + sh::sq("s/^# *" + locale + " /" + locale + " /") +
+                     " /etc/locale.gen && locale-gen || true; fi")
+        end
+    end
+
+    let tz: string = hkconf::get(p.config, "system", "timezone")
+    if tz != "" is
+        out.push("ln -sf " + sh::sq("/usr/share/zoneinfo/" + tz) + " /etc/localtime")
+        if !fedora is out.push("printf '%s\\n' " + sh::sq(tz) + " > /etc/timezone") end
+    end
+
+    let kb: string = hkconf::get(p.config, "system", "keyboard")
+    if kb != "" is
+        if fedora is
+            out.push("printf 'KEYMAP=%s\\n' " + sh::sq(kb) + " > /etc/vconsole.conf")
+        else is
+            out.push("mkdir -p /etc/default && printf 'XKBLAYOUT=\"%s\"\\n' " + sh::sq(kb) + " > /etc/default/keyboard")
+        end
+    end
+
+    let dm: string = project::display_manager(p, o, kind)
+    if dm != "" is
+        ;; display-manager.service wskazuje wybrany DM (konwencja systemd/Debiana)
+        out.push("ln -sf " + sh::sq("/usr/lib/systemd/system/" + dm + ".service") + " /etc/systemd/system/display-manager.service")
+        if !fedora is
+            out.push("mkdir -p /etc/X11 && printf '%s\\n' " + sh::sq("/usr/bin/" + dm) + " > /etc/X11/default-display-manager")
+        end
+    end
+
+    let en: [string] = hkconf::get_list(p.config, "system", "services-enable")
+    let mut i: int = 0
+    while i < array_len(en) is
+        out.push("systemctl enable " + sh::sq(unit(en[i])) + " || true")
+        i += 1
+    end
+    let dis: [string] = hkconf::get_list(p.config, "system", "services-disable")
+    i = 0
+    while i < array_len(dis) is
+        out.push("systemctl disable " + sh::sq(unit(dis[i])) + " || true")
+        i += 1
+    end
+    return out
+end
