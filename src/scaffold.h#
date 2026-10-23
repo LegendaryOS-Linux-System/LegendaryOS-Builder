@@ -2,6 +2,8 @@ mod opts
 mod devices
 mod sh
 mod ui
+mod version
+mod text
 
 ;; `legendaryos-builder new <nazwa> [--kind pc|phone|both] [--device ID]`
 
@@ -26,7 +28,7 @@ pub fn targets_for(kind: string, device: string) -> string is
     return "[pc:amd64]"
 end
 
-pub fn tpl_config_hk(name: string, kind: string, device: string) -> string is
+pub fn tpl_config_hk(name: string, kind: string, device: string, base: string, desktop: string) -> string is
     let mut o: string = ";; config.hk -- metadane projektu i wydania " + name + "\n\n"
     o = o + "[project]\n"
     o = o + "-> name    => " + name + "\n"
@@ -36,27 +38,50 @@ pub fn tpl_config_hk(name: string, kind: string, device: string) -> string is
     o = o + ";; urządzenia: legendaryos-builder devices\n"
     o = o + "-> targets => " + targets_for(kind, device) + "\n\n"
     o = o + "[release]\n"
-    o = o + "-> base     => hackeros\n"
-    o = o + "-> base-ref => official\n"
-    o = o + "-> suite    => trixie\n\n"
+    o = o + ";; hackeros = klasyczny LegendaryOS (Debian testing, live-build)\n"
+    o = o + ";; fedora   = LegendaryOS na Fedora Silverblue (atomowa; bootc + bootc-image-builder)\n"
+    o = o + "-> base     => " + base + "\n"
+    if base == "fedora" is
+        o = o + "\n[fedora]\n"
+        o = o + "-> version    => " + version::fedora_default_version() + "\n"
+        o = o + ";; -> image   => " + version::fedora_default_image() + "\n"
+        o = o + ";; -> repos   => [https://example.org/blue-environment.repo]\n"
+        o = o + ";; -> copr    => [owner/projekt]\n"
+        o = o + "-> filesystem => ext4\n\n"
+        o = o + "[container]\n"
+        o = o + "-> registry => ghcr.io/legendaryos-linux-system\n"
+        o = o + "-> image    => " + text::slug(name) + "\n"
+        o = o + "-> push     => false\n\n"
+    else is
+        o = o + "-> base-ref => official\n"
+        o = o + "-> suite    => trixie\n\n"
+    end
     o = o + "[branding]\n"
     o = o + "-> distro-name => " + name + "\n"
     o = o + "-> theme       => legendary-gold\n"
     o = o + "-> accent      => #6236B0\n"
     o = o + "-> background  => #120C1E\n\n"
     o = o + "[build]\n"
-    o = o + "-> mode     => live-build\n"
+    o = o + "-> mode     => " + (if base == "fedora" then "bootc" else "live-build") + "\n"
     o = o + "-> iso-name => " + name + "\n\n"
     o = o + "[packages]\n"
-    o = o + ";; -> desktop => xfce       ;; none | xfce | gnome | kde  (tylko komputery)\n"
+    o = o + ";; none | xfce | gnome | kde | cosmic (tylko fedora) | blue-environment  (tylko komputery)\n"
+    o = o + "-> desktop => " + desktop + "\n"
+    o = o + ";; display manager: auto (blue-environment => sdm) | none | sdm | gdm | sddm | lightdm\n"
+    o = o + ";; -> display-manager => auto\n"
     o = o + ";; -> include => [vim, htop]\n"
     o = o + ";; -> exclude => [os-prober]\n\n"
     o = o + "[base]\n"
     o = o + ";; co importować z bazy HackerOS: package-lists, hooks, includes\n"
     o = o + "-> import => [package-lists]\n"
+    o = o + "\n[live]\n"
+    o = o + ";; znaczniki .live / .live-legendaryos / .live-fedora-legendaryos (instalator Blue Environment)\n"
+    o = o + ";; auto = tylko gdy desktop => blue-environment\n"
+    o = o + "-> markers => auto\n"
     if kind == "phone" || kind == "both" is
         o = o + "\n[mobile]\n"
-        o = o + "-> shell => phosh\n"
+        o = o + ";; phosh | blue-environment | none\n"
+        o = o + "-> shell => " + (if desktop == "blue-environment" then "blue-environment" else "phosh") + "\n"
         o = o + ";; -> rootfs-size => 4096   ;; MiB; domyślnie liczone automatycznie\n"
         o = o + ";; -> cmdline     => quiet\n"
     end
@@ -151,6 +176,19 @@ pub fn create(dir: string, o: opts::Options) -> bool is
         return false
     end
 
+    let mut base: string = o.base
+    if base == "" is base = "hackeros" end
+    if !array_contains(version::known_bases(), base) is
+        ui::fail("--base musi być: " + str_join(version::known_bases(), ", ") + " (podano '" + base + "')")
+        return false
+    end
+    if base == "fedora" && kind != "pc" is
+        ui::fail("baza fedora buduje tylko komputery (--kind pc); telefony: baza hackeros")
+        return false
+    end
+    let mut desktop: string = o.desktop
+    if desktop == "" is desktop = "none" end
+
     sh::mkdir_p(dir)
     sh::mkdir_p(path_join(dir, "branding"))
     sh::mkdir_p(path_join(dir, "scripts"))
@@ -166,7 +204,7 @@ pub fn create(dir: string, o: opts::Options) -> bool is
     fs_write(path_join(dir, "scripts/10-prepare.hl"), tpl_example_script(name))
     fs_write(path_join(dir, "files/.gitkeep"), "")
     fs_write(path_join(dir, "build.hl"), tpl_build_hl(name))
-    fs_write(path_join(dir, "config.hk"), tpl_config_hk(name, kind, device))
+    fs_write(path_join(dir, "config.hk"), tpl_config_hk(name, kind, device, base, desktop))
     fs_write(path_join(dir, "user.hk"), tpl_user_hk(name))
     fs_write(path_join(dir, ".gitignore"), "user.hk\nbuild/\n")
 
