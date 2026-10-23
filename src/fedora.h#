@@ -1,0 +1,255 @@
+mod project
+mod hkconf
+mod opts
+mod target
+mod sh
+mod ui
+mod branding
+mod identity
+mod packages
+mod livemarkers
+mod systemcfg
+mod version
+
+;; Baza FEDORA (Silverblue -- system atomowy). Zamiast live-build:
+;;   stage    -> Containerfile + nakładka (branding, tożsamość, znaczniki .live*, files/)
+;;   build    -> `podman build` (obraz OCI/bootc) + bootc-image-builder (ISO instalacyjne)
+;;   finish   -> ISO do build/out/ + sumy SHA-256
+;; To jest "klasyczny LegendaryOS", tylko na Fedora Silverblue.
+;;
+;; Wymaga roota i podmana (obraz musi trafić do /var/lib/containers/storage,
+;; skąd czyta go bootc-image-builder).
+
+fn staging_dir(t: target::Target) -> string is
+    return path_join(t.work_dir, ".staging")
+end
+
+fn bib_out_dir(t: target::Target) -> string is
+    return path_join(t.work_dir, "bib-out")
+end
+
+pub fn fedora_version(p: project::Project) -> string is
+    return hkconf::get_or(p.config, "fedora", "version", version::fedora_default_version())
+end
+
+;; Obraz bazowy: <image>:<version>  (domyślnie quay.io/fedora-ostree-desktops/silverblue:44)
+pub fn base_image(p: project::Project) -> string is
+    return hkconf::get_or(p.config, "fedora", "image", version::fedora_default_image()) + ":" + fedora_version(p)
+end
+
+;; Nazwa obrazu wynikowego, np. ghcr.io/legendaryos-linux-system/legendaryos:stable
+;; (bez [container] -> registry: localhost/<image>:<tag>).
+pub fn image_ref(p: project::Project) -> string is
+    let img: string = string_lower(hkconf::get_or(p.config, "container", "image", "legendaryos"))
+    let reg: string = string_lower(hkconf::get(p.config, "container", "registry"))
+    let tg: string = project::tag(p)
+    if reg == "" is return "localhost/" + img + ":" + tg end
+    return reg + "/" + img + ":" + tg
+end
+
+fn podman_platform(arch: string) -> string is
+    if arch == "arm64" is return "linux/arm64" end
+    return "linux/amd64"
+end
+
+;; Containerfile -- czysta funkcja (testowana w selftest).
+pub fn containerfile(p: project::Project, o: opts::Options, t: target::Target) -> string is
+    let mut c: string = "# wygenerowane przez legendaryos-builder -- nie edytuj\n"
+    c = c + "FROM " + base_image(p) + "\n\n"
+    c = c + "LABEL org.opencontainers.image.title=\"" + project::distro_name(p) + "\"\n"
+    c = c + "LABEL org.opencontainers.image.version=\"" + project::proj_version(p) + "\"\n"
+    c = c + "LABEL containers.bootc=\"1\"\n\n"
+
+    let repos: [string] = hkconf::get_list(p.config, "fedora", "repos")
+    let mut i: int = 0
+    while i < array_len(repos) is
+        c = c + "RUN dnf -y config-manager addrepo --from-repofile=" + sh::sq(repos[i]) + "\n"
+        i += 1
+    end
+    let copr: [string] = hkconf::get_list(p.config, "fedora", "copr")
+    i = 0
+    while i < array_len(copr) is
+        c = c + "RUN dnf -y copr enable " + sh::sq(copr[i]) + "\n"
+        i += 1
+    end
+
+    let pk: [string] = packages::rpm_package_names(p, o)
+    if array_len(pk) > 0 is
+        let mut quoted: [string] = []
+        i = 0
+        while i < array_len(pk) is
+            quoted.push(sh::sq(pk[i]))
+            i += 1
+        end
+        c = c + "RUN dnf -y install " + str_join(quoted, " ") + " && dnf clean all\n"
+    end
+
+    ;; nakładka "after packages": branding, tożsamość, .live*, files/ projektu
+    c = c + "\nCOPY includes.chroot_after_packages/ /\n\n"
+
+    let mut lines: [string] = systemcfg::shell_lines(p, o, "pc", true)
+    lines.push("if command -v plymouth-set-default-theme >/dev/null 2>&1 && [ -d /usr/share/plymouth/themes/legendaryos ]; then plymouth-set-default-theme legendaryos || true; fi")
+    i = 0
+    while i < array_len(lines) is
+        c = c + "RUN " + lines[i] + "\n"
+        i += 1
+    end
+    c = c + "\nRUN bootc container lint || true\n"
+    return c
+end
+
+;; config.toml dla bootc-image-builder (argumenty jądra z [fedora] -> kernel-args).
+pub fn bib_config(p: project::Project) -> string is
+    let args: string = hkconf::get_or(p.config, "fedora", "kernel-args", "quiet splash")
+    let mut s: string = "# wygenerowane przez legendaryos-builder\n"
+    s = s + "[customizations.kernel]\n"
+    s = s + "append = \"" + string_replace(args, "\"", "") + "\"\n"
+    return s
+end
+
+;; Argumenty `podman run ... bootc-image-builder` -- czysta funkcja.
+pub fn bib_args(p: project::Project, t: target::Target, config_path: string) -> [string] is
+    let mut a: [string] = [
+        "run", "--rm", "--privileged", "--pull=newer",
+        "--security-opt", "label=type:unconfined_t",
+        "-v", sh::absolute(bib_out_dir(t)) + ":/output",
+        "-v", "/var/lib/containers/storage:/var/lib/containers/storage",
+        "-v", config_path + ":/config.toml:ro",
+        version::bib_image(),
+        "--type", "anaconda-iso",
+        "--rootfs", hkconf::get_or(p.config, "fedora", "filesystem", "ext4"),
+    ]
+    if t.arch == "arm64" is
+        a.push("--target-arch")
+        a.push("arm64")
+    end
+    a.push(image_ref(p))
+    return a
+end
+
+fn quote_args(args: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(args) is
+        if i > 0 is out = out + " " end
+        out = out + sh::sq(args[i])
+        i += 1
+    end
+    return out
+end
+
+fn ex(o: opts::Options, dir: string, cmd: string) -> int is
+    if o.verbose is ui::debug("(" + dir + ") " + cmd) end
+    if o.dry_run is
+        ui::muted("[dry-run] " + cmd)
+        return 0
+    end
+    return sh::in_dir(dir, cmd)
+end
+
+;; Etap 1: nakładka + Containerfile (baza HackerOS nie jest używana na Fedorze).
+pub fn stage(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    let st: string = staging_dir(t)
+    sh::rm_rf(st)
+    sh::mkdir_p(st)
+    if hkconf::get(p.config, "base", "import") != "" is
+        ui::muted("[base] -> import jest ignorowane dla bazy fedora")
+    end
+    let nb: int = branding::stage(p, o, t, st)
+    let ni: int = identity::stage(p, o, st)
+    let nm: int = livemarkers::stage(p, o, t, st)
+    let files: string = path_join(p.root, "files")
+    if fs_is_dir(files) is
+        sh::copy_tree(files, path_join(st, "includes.chroot_after_packages"))
+    end
+    sh::write_text(path_join(st, "Containerfile"), containerfile(p, o, t))
+    sh::write_text(path_join(st, "bib-config.toml"), bib_config(p))
+    ui::ok("nakładka [" + target::label(t) + "] (fedora " + fedora_version(p) + "): branding " + to_string(nb) +
+           ", tożsamość " + to_string(ni) + ", znaczniki live " + to_string(nm) + " -> " + st)
+    return true
+end
+
+;; Etap 2: sprawdź podmana i zapisz katalogi robocze (odpowiednik `lb config`).
+pub fn configure(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if !sh::tool_exists("podman") && !o.dry_run is
+        ui::fail("nie znaleziono `podman` w PATH -- zainstaluj pakiet `podman` (baza fedora buduje obraz OCI)")
+        return false
+    end
+    sh::mkdir_p(t.work_dir)
+    sh::mkdir_p(bib_out_dir(t))
+    ui::ok("fedora config [" + target::label(t) + "]: " + base_image(p) + " -> " + image_ref(p))
+    return true
+end
+
+;; Etap 3: podman build + bootc-image-builder. Log w <work>/build.log.
+pub fn build(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if !o.dry_run is
+        if !sh::tool_exists("podman") is
+            ui::fail("nie znaleziono `podman`")
+            return false
+        end
+        if !sh::is_root() is
+            ui::fail("budowa na Fedorze wymaga roota (obraz musi trafić do magazynu roota): sudo legendaryos-builder build")
+            return false
+        end
+    end
+    let st: string = staging_dir(t)
+    ui::info("podman build [" + target::label(t) + "] -- to może potrwać długo (log: " + path_join(t.work_dir, "build.log") + ")")
+    ;; polecenia idą z katalogu roboczego celu; rc i log to nazwy względne względem niego
+    let build_cmd: string = "podman build --platform " + podman_platform(t.arch) + " -t " + sh::sq(image_ref(p)) + " -f .staging/Containerfile .staging"
+    let rc_file: string = path_join(t.work_dir, ".lb-rc")
+    sh::rm_rf(rc_file)
+    ex(o, t.work_dir, "{{ " + build_cmd + " 2>&1; echo $? > .lb-rc; }} | tee build.log")
+    if !o.dry_run is
+        let mut rc: int = 1
+        if fs_is_file(rc_file) is rc = conv_str_to_int(string_trim(fs_read(rc_file))) end
+        if rc != 0 is
+            ui::fail("podman build zakończył się błędem (kod " + to_string(rc) + ")")
+            return false
+        end
+    end
+
+    ui::info("bootc-image-builder [" + target::label(t) + "] -> anaconda-iso")
+    let cfg: string = sh::absolute(path_join(st, "bib-config.toml"))
+    let bib_cmd: string = "podman " + quote_args(bib_args(p, t, cfg))
+    let bib_rc_file: string = path_join(t.work_dir, ".bib-rc")
+    sh::rm_rf(bib_rc_file)
+    ex(o, t.work_dir, "{{ " + bib_cmd + " 2>&1; echo $? > .bib-rc; }} | tee -a build.log")
+    if !o.dry_run is
+        let mut rc2: int = 1
+        if fs_is_file(bib_rc_file) is rc2 = conv_str_to_int(string_trim(fs_read(bib_rc_file))) end
+        if rc2 != 0 is
+            ui::fail("bootc-image-builder zakończył się błędem (kod " + to_string(rc2) + ")")
+            return false
+        end
+    end
+
+    if hkconf::get_bool(p.config, "container", "push", false) is
+        ui::info("podman push " + image_ref(p))
+        if ex(o, t.work_dir, "podman push " + sh::sq(image_ref(p))) != 0 is
+            ui::fail("podman push nie powiódł się (zalogowano do rejestru? `podman login`)")
+            return false
+        end
+    end
+    return true
+end
+
+;; Etap 4: ISO -> build/out/<name>.iso + SHA-256.
+pub fn finish(p: project::Project, o: opts::Options, t: target::Target, name: string) -> [string] is
+    let mut produced: [string] = []
+    sh::mkdir_p(t.out_dir)
+    let iso: string = path_join(bib_out_dir(t), "bootiso/install.iso")
+    if !o.dry_run is
+        if !fs_is_file(iso) is
+            ui::fail("brak " + iso + " -- bootc-image-builder nie wygenerował ISO")
+            return []
+        end
+        sh::run("mv -f " + sh::sq(iso) + " " + sh::sq(path_join(t.out_dir, name + ".iso")))
+    end
+    produced.push(name + ".iso")
+    if !o.dry_run is
+        sh::in_dir(t.out_dir, "sha256sum " + str_join(produced, " ") + " > " + sh::sq(name + ".SHA256SUMS"))
+        produced.push(name + ".SHA256SUMS")
+    end
+    return produced
+end
