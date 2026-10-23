@@ -77,8 +77,8 @@ Opcjonalne własne listy live-build. Trafiają obok wygenerowanej
 -> targets     => [pc:amd64, pc:arm64, phone:arm64:pinephone]
 
 [release]
--> base        => hackeros
--> base-ref    => official          ;; gałąź/tag bazy HackerOS
+-> base        => hackeros          ;; hackeros | fedora
+-> base-ref    => official          ;; gałąź/tag bazy HackerOS (tylko hackeros)
 -> base-url    => https://github.com/HackerOS-Linux-System/HackerOS.git
 -> suite       => trixie
 
@@ -99,7 +99,8 @@ Opcjonalne własne listy live-build. Trafiają obok wygenerowanej
 -> firmware     => true
 
 [packages]
--> desktop    => xfce               ;; none | xfce | gnome | kde  (komputery)
+-> desktop    => xfce               ;; none | xfce | gnome | kde | cosmic (tylko fedora) | blue-environment
+-> display-manager => auto          ;; auto (blue-environment => sdm) | none | sdm | gdm | sddm | lightdm
 -> include    => [vim, htop]
 -> exclude    => [os-prober]
 -> recommends => true
@@ -108,13 +109,30 @@ Opcjonalne własne listy live-build. Trafiają obok wygenerowanej
 -> motd              => Witaj!\nDruga linia
 -> hostname          => legendary
 -> generate-identity => true         ;; os-release, lsb-release, issue...
+-> locale            => pl_PL.UTF-8
+-> timezone          => Europe/Warsaw
+-> keyboard          => pl
+-> services-enable   => [sshd, NetworkManager]
+-> services-disable  => [ModemManager]
 
 [base]
 -> import => [package-lists, hooks, includes]
 -> helper => desktop                 ;; zawęża do helpers/desktop/ w repo bazy
 
+[live]                               ;; znaczniki sesji live dla Blue Installer
+-> markers     => auto               ;; auto | true | false
+
+[fedora]                             ;; tylko base => fedora (patrz FEDORA.md)
+-> version     => 44
+-> filesystem  => ext4
+
+[container]                          ;; tylko base => fedora
+-> registry    => ghcr.io/org
+-> image       => legendaryos
+-> push        => false
+
 [mobile]                             ;; tylko dla celów phone:*
--> shell       => phosh              ;; phosh | none
+-> shell       => phosh              ;; phosh | blue-environment | none
 -> rootfs-size => 4096               ;; MiB (domyślnie liczone automatycznie)
 -> cmdline     => quiet
 -> root-label  => LEGENDARY_ROOT
