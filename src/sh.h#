@@ -57,6 +57,15 @@ pub fn copy_file(src: string, dst: string) -> bool is
     return raw("cp -f " + sq(src) + " " + sq(dst)) == 0
 end
 
+;; Ścieżka bezwzględna (podman -v wymaga absolutnych ścieżek hosta).
+pub fn absolute(path: string) -> string is
+    if string_starts_with(path, "/") is return path end
+    let mut rel: string = path
+    while string_starts_with(rel, "./") is rel = string_slice(rel, 2, string_len(rel)) end
+    if rel == "." || rel == "" is return capture("pwd") end
+    return capture("pwd") + "/" + rel
+end
+
 pub fn is_root() -> bool is
     return capture("id -u") == "0"
 end
