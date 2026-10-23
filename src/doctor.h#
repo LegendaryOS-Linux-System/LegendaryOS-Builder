@@ -32,10 +32,16 @@ pub fn run_checks(p: project::Project, has_project: bool, o: opts::Options) -> i
     let free: int = sh::free_mb(".")
     if free >= 0 is ui::kv("wolne miejsce", to_string(free) + " MiB") end
 
+    let fedora: bool = has_project && project::is_fedora(p, o)
     ui::title("Narzędzia podstawowe")
-    if !need("lb", "apt install live-build") is missing += 1 end
+    ui::kv("baza", if fedora then "fedora (Silverblue, bootc)" else "hackeros (Debian, live-build)")
+    if fedora is
+        if !need("podman", "dnf/apt install podman (obraz OCI + bootc-image-builder)") is missing += 1 end
+    else is
+        if !need("lb", "apt install live-build") is missing += 1 end
+        if !need("git", "apt install git") is missing += 1 end
+    end
     if !need("hl", "zainstaluj Hacker Lang (HackerOS)") is missing += 1 end
-    if !need("git", "apt install git") is missing += 1 end
     if !need("sha256sum", "apt install coreutils") is missing += 1 end
     if !need("tar", "apt install tar") is missing += 1 end
     if !need("xz", "apt install xz-utils") is missing += 1 end
