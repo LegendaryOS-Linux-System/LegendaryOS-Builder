@@ -10,7 +10,7 @@ end
 pub fn flags() -> [string] is
     return ["--verbose", "--dry-run", "--keep-staging", "--no-base", "--yes", "--strict", "--clean",
             "--no-color", "--keep-going", "--arch", "--suite", "--ref", "--iso-name", "--target",
-            "--kind", "--device", "--help", "--version"]
+            "--kind", "--device", "--base", "--desktop", "--help", "--version"]
 end
 
 pub fn bash() -> string is
@@ -19,6 +19,8 @@ pub fn bash() -> string is
     o = o + "    case \"$prev\" in\n"
     o = o + "        --arch) COMPREPLY=($(compgen -W \"amd64 arm64 armhf i386\" -- \"$cur\")); return ;;\n"
     o = o + "        --target) COMPREPLY=($(compgen -W \"pc phone\" -- \"$cur\")); return ;;\n"
+    o = o + "        --base) COMPREPLY=($(compgen -W \"hackeros fedora\" -- \"$cur\")); return ;;\n"
+    o = o + "        --desktop) COMPREPLY=($(compgen -W \"none xfce gnome kde cosmic blue-environment\" -- \"$cur\")); return ;;\n"
     o = o + "        --kind) COMPREPLY=($(compgen -W \"pc phone both\" -- \"$cur\")); return ;;\n"
     o = o + "        --device) COMPREPLY=($(compgen -W \"" + str_join(devices::ids(), " ") + "\" -- \"$cur\")); return ;;\n"
     o = o + "        completions) COMPREPLY=($(compgen -W \"bash zsh fish\" -- \"$cur\")); return ;;\n"
