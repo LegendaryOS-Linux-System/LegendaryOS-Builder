@@ -44,6 +44,15 @@ end
 
 ;; ── wartości efektywne (config.hk + nadpisania z flag) ───────────────
 
+;; Wbuduj w config flagi --base / --desktop, żeby walidacja i cała reszta
+;; widziały jedną, spójną konfigurację.
+pub fn apply_overrides(p: Project, o: opts::Options) -> Project is
+    let mut cfg: hkconf::HkFile = p.config
+    if o.base != "" is cfg = hkconf::override_value(cfg, "release", "base", o.base) end
+    if o.desktop != "" is cfg = hkconf::override_value(cfg, "packages", "desktop", o.desktop) end
+    return Project { root: p.root, config: cfg, user: p.user }
+end
+
 pub fn name(p: Project) -> string is
     return hkconf::get_or(p.config, "project", "name", "legendaryos")
 end
@@ -72,6 +81,57 @@ end
 pub fn suite(p: Project, o: opts::Options) -> string is
     if o.suite != "" is return o.suite end
     return hkconf::get_or(p.config, "release", "suite", "trixie")
+end
+
+;; Baza systemu: flaga --base ma pierwszeństwo, potem [release] -> base.
+pub fn base(p: Project, o: opts::Options) -> string is
+    if o.base != "" is return o.base end
+    return string_lower(hkconf::get_or(p.config, "release", "base", "hackeros"))
+end
+
+pub fn is_fedora(p: Project, o: opts::Options) -> bool is
+    return base(p, o) == "fedora"
+end
+
+;; Środowisko graficzne komputera: --desktop > [packages] -> desktop > none.
+pub fn desktop(p: Project, o: opts::Options) -> string is
+    if o.desktop != "" is return o.desktop end
+    return hkconf::get_or(p.config, "packages", "desktop", "none")
+end
+
+;; Tryb budowy: hackeros -> live-build, fedora -> bootc.
+pub fn build_mode(p: Project, o: opts::Options) -> string is
+    let fallback: string = if is_fedora(p, o) then "bootc" else "live-build"
+    return hkconf::get_or(p.config, "build", "mode", fallback)
+end
+
+;; Czy to środowisko/powłoka to Blue Environment (dla danego rodzaju celu)?
+pub fn uses_blue(p: Project, o: opts::Options, kind: string) -> bool is
+    if kind == "phone" is
+        return hkconf::get_or(p.config, "mobile", "shell", "phosh") == "blue-environment"
+    end
+    return desktop(p, o) == "blue-environment"
+end
+
+;; Display manager: [packages] -> display-manager (auto|none|nazwa).
+;; auto: Blue Environment => sdm; pozostałe środowiska zostają przy swoim.
+;; Zwraca "" gdy nie ma instalować/włączać żadnego.
+pub fn display_manager(p: Project, o: opts::Options, kind: string) -> string is
+    let dm: string = string_lower(hkconf::get_or(p.config, "packages", "display-manager", "auto"))
+    if dm == "none" is return "" end
+    if dm != "auto" is return dm end
+    if uses_blue(p, o, kind) is return version::blue_display_manager() end
+    return ""
+end
+
+;; Znaczniki live: [live] -> markers = auto | true | false.
+;; auto: tylko dla komputerów z Blue Environment (czyli gdy jest instalator Blue).
+pub fn live_markers_enabled(p: Project, o: opts::Options, kind: string) -> bool is
+    if kind != "pc" is return false end
+    let m: string = string_lower(hkconf::get_or(p.config, "live", "markers", "auto"))
+    if m == "true" is return true end
+    if m == "false" is return false end
+    return uses_blue(p, o, "pc")
 end
 
 pub fn base_ref(p: Project, o: opts::Options) -> string is
@@ -299,14 +359,20 @@ end
 fn known_keys(section: string) -> [string] is
     if section == "project" is return ["name", "tag", "arch", "targets", "version", "description"] end
     if section == "release" is return ["base", "base-ref", "base-url", "suite", "codename"] end
+    if section == "fedora" is return ["version", "image", "repos", "copr", "filesystem", "kernel-args"] end
+    if section == "container" is return ["registry", "image", "push"] end
+    if section == "live" is return ["markers"] end
     if section == "branding" is
         return ["distro-name", "theme", "accent", "background", "home-url", "support-url", "bug-url"]
     end
     if section == "build" is
         return ["mode", "iso-name", "volume-label", "publisher", "bootappend", "firmware"]
     end
-    if section == "packages" is return ["include", "exclude", "recommends", "desktop"] end
-    if section == "system" is return ["motd", "hostname", "generate-identity"] end
+    if section == "packages" is return ["include", "exclude", "recommends", "desktop", "display-manager"] end
+    if section == "system" is
+        return ["motd", "hostname", "generate-identity", "locale", "timezone", "keyboard",
+                "services-enable", "services-disable"]
+    end
     if section == "base" is return ["import", "helper"] end
     if section == "target" is return ["kind", "image"] end
     if section == "mobile" is return ["device", "shell", "rootfs-size", "cmdline", "root-label"] end
@@ -314,13 +380,20 @@ fn known_keys(section: string) -> [string] is
 end
 
 fn known_sections() -> [string] is
-    return ["project", "release", "branding", "build", "packages", "system", "base", "target", "mobile"]
+    return ["project", "release", "branding", "build", "packages", "system", "base", "target", "mobile",
+            "fedora", "container", "live"]
 end
 
 pub fn known_kinds() -> [string] is return ["pc", "phone"] end
 pub fn known_images() -> [string] is return ["iso", "rootfs-tar", "raw-img", "android-img"] end
-pub fn known_shells() -> [string] is return ["phosh", "none"] end
-pub fn known_desktops() -> [string] is return ["none", "xfce", "gnome", "kde"] end
+pub fn known_shells() -> [string] is return ["phosh", "blue-environment", "none"] end
+pub fn known_desktops() -> [string] is
+    return ["none", "xfce", "gnome", "kde", "cosmic", "blue-environment"]
+end
+pub fn known_display_managers() -> [string] is
+    return ["auto", "none", "sdm", "gdm", "sddm", "lightdm", "cosmic-greeter"]
+end
+pub fn known_filesystems() -> [string] is return ["ext4", "xfs", "btrfs"] end
 
 fn is_hex_color(s: string) -> bool is
     let t: string = string_trim(s)
@@ -537,10 +610,34 @@ fn check_config_hk(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult 
         result = at(result, true, "config::iso_name", "[build] -> iso-name '" + iso + "' nie może zawierać spacji ani '/'",
                     hk, hkconf::locate_value(hk, "build", "iso-name"), "tu", "np. `" + text::slug(iso) + "`")
     end
-    let mode: string = hkconf::get_or(hk, "build", "mode", "live-build")
-    if mode != "live-build" is
-        result = check_enum(result, hk, "build", "mode", mode, ["live-build"], true)
+    let base_v: string = string_lower(hkconf::get_or(hk, "release", "base", "hackeros"))
+    result = check_enum(result, hk, "release", "base", base_v, version::known_bases(), true)
+    let fedora: bool = base_v == "fedora"
+    let mode: string = hkconf::get_or(hk, "build", "mode", if fedora then "bootc" else "live-build")
+    let want_mode: string = if fedora then "bootc" else "live-build"
+    if mode != want_mode is
+        result = at(result, true, "config::mode", "[build] -> mode `" + mode + "` nie pasuje do bazy `" + base_v + "`",
+                    hk, hkconf::locate_value(hk, "build", "mode"), "tu", "dla bazy " + base_v + " użyj `" + want_mode + "`")
     end
+    if fedora is
+        let fs: string = hkconf::get_or(hk, "fedora", "filesystem", "ext4")
+        result = check_enum(result, hk, "fedora", "filesystem", fs, known_filesystems(), true)
+        let kinds: [string] = hkconf::get_list(hk, "project", "targets")
+        let mut k: int = 0
+        while k < array_len(kinds) is
+            if string_starts_with(kinds[k], "phone:") is
+                result = at(result, true, "config::fedora_phone",
+                            "cel `" + kinds[k] + "`: baza fedora (Silverblue) buduje tylko komputery",
+                            hk, hkconf::locate_value(hk, "project", "targets"), "tu",
+                            "telefony budujemy na bazie hackeros (Debian + live-build)")
+            end
+            k += 1
+        end
+    end
+    let dmgr: string = string_lower(hkconf::get_or(hk, "packages", "display-manager", "auto"))
+    result = check_enum(result, hk, "packages", "display-manager", dmgr, known_display_managers(), true)
+    let lm: string = string_lower(hkconf::get_or(hk, "live", "markers", "auto"))
+    result = check_enum(result, hk, "live", "markers", lm, ["auto", "true", "false"], true)
 
     let accent: string = hkconf::get(hk, "branding", "accent")
     if accent != "" && !is_hex_color(accent) is
@@ -556,6 +653,11 @@ fn check_config_hk(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult 
     let desktop: string = hkconf::get(hk, "packages", "desktop")
     if desktop != "" is
         result = check_enum(result, hk, "packages", "desktop", desktop, known_desktops(), true)
+        if desktop == "cosmic" && !fedora is
+            result = at(result, true, "config::desktop_base", "środowisko `cosmic` jest dostępne tylko na bazie fedora",
+                        hk, hkconf::locate_value(hk, "packages", "desktop"), "tu",
+                        "na bazie hackeros użyj: xfce, gnome, kde albo blue-environment")
+        end
     end
 
     result = check_targets(hk, result)
