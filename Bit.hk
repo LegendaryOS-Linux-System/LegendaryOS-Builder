@@ -1,10 +1,10 @@
 [package]
 -> name        => legendaryos-builder
--> version     => 0.6.0
--> description => Narzędzie do budowy dystrybucji LegendaryOS (baza: HackerOS) dla komputerów i telefonów — nakładka na live-build
+-> version     => 0.8.0
+-> description => Narzędzie do budowy dystrybucji LegendaryOS (baza: HackerOS/Debian albo Fedora Silverblue) dla komputerów i telefonów — nakładka na live-build i bootc-image-builder
 -> authors     => ["LegendaryOS Team"]
 -> license     => MIT
--> keywords     => ["live-build", "iso", "linux", "arm64", "mobile", "hackeros"]
+-> keywords     => ["live-build", "iso", "linux", "arm64", "mobile", "hackeros", "fedora", "silverblue", "bootc", "blue-environment"]
 -> readme      => README.adoc
 -> lang        => h#
 
