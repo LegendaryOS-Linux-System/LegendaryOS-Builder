@@ -24,6 +24,8 @@ https://github.com/bit-io/bit[`bit`]. Używa bibliotek z bit.io:
 |Telefony |Obraz rootfs + surowy obraz dysku z U-Bootem (PinePhone, PinePhone Pro, Librem 5) albo `boot.img` + `rootfs.img` dla fastboot (eksperymentalne). Środowisko: Phosh.
 |Kilka celów naraz |`-> targets => [pc:amd64, pc:arm64, phone:arm64:pinephone]` buduje wszystko jednym poleceniem, każdy cel w osobnym katalogu roboczym.
 |Cross-build |`arm64` na hoście `amd64` (i odwrotnie) przez `qemu-user-static` — wykrywany i konfigurowany automatycznie.
+|Dwie bazy |`[release] -> base => hackeros` (klasyczny LegendaryOS: Debian testing, `live-build`) albo `fedora` (LegendaryOS na *Fedora Silverblue*, atomowa: `podman build` → obraz OCI/bootc → `bootc-image-builder`). Szczegóły: link:docs/FEDORA.md[`docs/FEDORA.md`].
+|Blue Environment |`[packages] -> desktop => blue-environment` (komputery) i `[mobile] -> shell => blue-environment` (telefony); display manager domyślnie *sdm*; sesja live z instalatorem Blue Installer (znaczniki `.live`, `.live-legendaryos`, `.live-fedora-legendaryos`).
 |Baza HackerOS |Lokalne lustro + migawka per build; import list pakietów / hooków / includes do nakładki; commit bazy w notatkach wydania.
 |Branding |5 obrazów trafia do Calamares, Plymouth, GRUB i splash-a bootloaderów live; generowane są też pliki, które je aktywują (`branding.desc`, motyw Plymouth, konfiguracja GRUB, hook chroot).
 |Tożsamość systemu |`os-release`, `lsb-release`, `issue`, `motd`, `hostname` z `config.hk`.
@@ -40,7 +42,8 @@ Wymagania do *zbudowania buildera*:
 
 Wymagania do *budowania systemów* (sprawdza je `legendaryos-builder doctor`):
 
-* `live-build`, `git`, `hl` (Hacker Lang), `xz`, `tar`
+* baza hackeros: `live-build`, `git`; baza fedora: `podman` (+ obraz `bootc-image-builder`)
+* `hl` (Hacker Lang; puste skrypty `scripts/*.hl` są pomijane bez niego), `xz`, `tar`
 * telefony: `e2fsprogs` (≥ 1.43), `parted` (+ `mkbootimg` dla Androida)
 * cross-build: `qemu-user-static`, `binfmt-support`
 * `lb build` wymaga roota
@@ -134,9 +137,36 @@ Pełny opis: link:docs/STRUKTURA.md[`docs/STRUKTURA.md`].
 |`run-scripts`, `stage`, `lb-config`, `lb-build` |Pojedyncze etapy builda (wołane też z `build.hl` projektu).
 |===
 
-Opcje: `--target`, `--arch`, `--suite`, `--ref`, `--iso-name`, `--no-base`,
+Opcje: `--base`, `--desktop`, `--target`, `--arch`, `--suite`, `--ref`, `--iso-name`, `--no-base`,
 `--strict`, `--clean`, `--keep-going`, `--keep-staging`, `-n/--dry-run`,
 `-v/--verbose`, `--no-color`.
+
+== Blue Environment, sdm i sesja live
+
+[source]
+----
+[packages]
+-> desktop         => blue-environment   ;; none | xfce | gnome | kde | cosmic (tylko fedora) | blue-environment
+-> display-manager => auto               ;; auto (blue-environment => sdm) | none | sdm | gdm | sddm | lightdm
+
+[mobile]
+-> shell => blue-environment             ;; phosh | blue-environment | none  (DM: sdm)
+
+[live]
+-> markers => auto                       ;; auto | true | false
+----
+
+* Wybór `blue-environment` instaluje pakiet `blue-environment` oraz display manager `sdm`,
+  ustawia `display-manager.service` → `sdm` (i `/etc/X11/default-display-manager` na Debianie).
+  Na telefonach pakiet to `blue-environment-phones` (wariant UI `phones` jest wariantem *budowy*
+  Blue Environment; nazwę zmienisz w `src/version.h#`).
+* Na komputerach z Blue Environment *zamiast Calamares* instalatorem jest Blue Installer — builder
+  dokłada narzędzia, których potrzebuje (rsync, parted, dosfstools, e2fsprogs, xz-utils).
+* Znaczniki sesji live trafiają do `/etc/skel/.config/Blue-Environment/`:
+  `.live` (kontrakt Blue Environment: pokaż Blue Installer), `.live-legendaryos` (zawsze)
+  i `.live-fedora-legendaryos` (gdy baza = fedora). `markers => auto` włącza je tylko dla
+  komputerów z Blue Environment.
+* Flagi `--base` i `--desktop` nadpisują `config.hk` (używa ich workflow CI LegendaryOS).
 
 == Zależności (`Bit.hk`)
 
