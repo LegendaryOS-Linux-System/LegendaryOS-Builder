@@ -55,7 +55,11 @@ Dodanie urządzenia = dopisanie wpisu `Device { ... }` w `devices::all()`.
 ### Środowisko telefonu
 
 `[mobile] -> shell => phosh` instaluje Phosh (phoc, squeekboard, feedbackd, gnome-calls, chatty…).
+`blue-environment` — Blue Environment w wariancie telefonicznym (pakiet `blue-environment-phones`,
+UI `phones`) + display manager `sdm` (`[packages] -> display-manager` nadpisuje).
 `none` — bez środowiska graficznego (własne pakiety przez `[packages] -> include`).
+
+Telefony buduje wyłącznie baza `hackeros`; baza `fedora` (Silverblue) buduje tylko komputery.
 
 ### Ograniczenia — przeczytaj przed wgraniem na sprzęt
 
