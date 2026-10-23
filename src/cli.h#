@@ -15,6 +15,8 @@ mod release
 mod doctor
 mod completions
 mod packages
+mod fedora
+mod livemarkers
 mod selftest
 
 ;; Parsowanie argumentów i dyspozytor komend. Każda komenda zwraca kod
@@ -29,7 +31,7 @@ end
 
 fn flag_takes_value(f: string) -> bool is
     return f == "--arch" || f == "--suite" || f == "--ref" || f == "--iso-name" || f == "--target" ||
-           f == "--kind" || f == "--device"
+           f == "--kind" || f == "--device" || f == "--base" || f == "--desktop"
 end
 
 fn apply_value(o: opts::Options, f: string, v: string) -> opts::Options is
@@ -41,6 +43,8 @@ fn apply_value(o: opts::Options, f: string, v: string) -> opts::Options is
     if f == "--target" is n.target = v end
     if f == "--kind" is n.kind = v end
     if f == "--device" is n.device = v end
+    if f == "--base" is n.base = v end
+    if f == "--desktop" is n.desktop = v end
     return n
 end
 
@@ -131,7 +135,7 @@ pub fn print_help() is
     ui::plain(ui::banner(version::version()))
     ui::plain("  Użycie: " + ui::code("legendaryos-builder <komenda> [argumenty] [opcje]"))
     ui::title("Komendy")
-    ui::cmd_row("new <nazwa>", "utwórz szkielet projektu (--kind pc|phone|both, --device ID)")
+    ui::cmd_row("new <nazwa>", "utwórz szkielet projektu (--kind pc|phone|both, --device ID, --base B, --desktop D)")
     ui::cmd_row("validate [ścieżka]", "zwaliduj projekt (raport nidus)")
     ui::cmd_row("build [ścieżka]", "pełny build wszystkich celów (komputery + telefony)")
     ui::cmd_row("clean [ścieżka]", "usuń build/ w projekcie")
@@ -145,12 +149,14 @@ pub fn print_help() is
     ui::cmd_row("selftest", "wbudowane testy")
     ui::title("Etapy (pojedyncze kroki builda)")
     ui::cmd_row("run-scripts [ścieżka]", "uruchom scripts/*.hl")
-    ui::cmd_row("stage [ścieżka]", "złóż nakładkę live-build (baza + branding + pakiety)")
-    ui::cmd_row("lb-config [ścieżka]", "lb config dla każdego celu")
-    ui::cmd_row("lb-build [ścieżka]", "lb build + artefakty (wymaga roota)")
+    ui::cmd_row("stage [ścieżka]", "złóż nakładkę (hackeros: live-build; fedora: Containerfile)")
+    ui::cmd_row("lb-config [ścieżka]", "lb config (hackeros) / kontrola podmana (fedora) dla każdego celu")
+    ui::cmd_row("lb-build [ścieżka]", "lb build albo podman build + bootc-image-builder + artefakty (wymaga roota)")
     ui::title("Opcje")
     ui::flag_row("--target T", "filtr: pc | phone | pc:amd64 | phone:arm64:pinephone")
     ui::flag_row("--arch A", "tylko ta architektura (amd64, arm64, armhf, i386)")
+    ui::flag_row("--base B", "nadpisz [release] -> base: hackeros (Debian) | fedora (Silverblue)")
+    ui::flag_row("--desktop D", "nadpisz [packages] -> desktop (none|xfce|gnome|kde|cosmic|blue-environment)")
     ui::flag_row("--suite S", "nadpisz [release] -> suite")
     ui::flag_row("--ref R", "nadpisz [release] -> base-ref")
     ui::flag_row("--iso-name N", "nadpisz [build] -> iso-name")
@@ -174,7 +180,7 @@ struct LoadResult is
 end
 
 fn load_and_check(root: string, o: opts::Options) -> LoadResult is
-    let p: project::Project = project::load(root)
+    let p: project::Project = project::apply_overrides(project::load(root), o)
     let mut v: project::ValidationResult = project::validate(p)
     if o.strict is v = project::promote_warnings(v) end
     diag::print_issues(p, v)
@@ -353,7 +359,11 @@ end
 
 fn cmd_sync_base(pr: Parsed) -> int is
     let root: string = arg_or(pr, 0, ".")
-    let p: project::Project = project::load(root)
+    let p: project::Project = project::apply_overrides(project::load(root), pr.opts)
+    if project::is_fedora(p, pr.opts) is
+        ui::info("baza fedora nie używa lustra HackerOS -- sync-base nie jest potrzebne")
+        return 0
+    end
     let ref_name: string = project::base_ref(p, pr.opts)
     let url: string = project::base_url(p)
     if gitsync::bootstrap_mirror(url, ref_name, project::token(p)) is
@@ -397,7 +407,7 @@ end
 fn cmd_doctor(pr: Parsed) -> int is
     let root: string = arg_or(pr, 0, ".")
     let has_project: bool = fs_is_file(path_join(root, "config.hk"))
-    let p: project::Project = project::load(root)
+    let p: project::Project = project::apply_overrides(project::load(root), pr.opts)
     let missing: int = doctor::run_checks(p, has_project, pr.opts)
     ui::blank()
     if missing == 0 is
@@ -415,13 +425,21 @@ fn cmd_info(pr: Parsed) -> int is
     let o: opts::Options = pr.opts
     ui::title(project::distro_name(p) + " " + project::proj_version(p) + " (" + project::tag(p) + ")")
     ui::kv("projekt", project::name(p))
-    ui::kv("suite", project::suite(p, o))
-    ui::kv("baza", hkconf::get_or(p.config, "release", "base", "hackeros") + " @ " + project::base_ref(p, o))
+    if project::is_fedora(p, o) is
+        ui::kv("baza", "fedora (Silverblue " + hkconf::get_or(p.config, "fedora", "version", version::fedora_default_version()) + ", atomowa)")
+        ui::kv("obraz", fedora::base_image(p) + "  ->  " + fedora::image_ref(p))
+    else is
+        ui::kv("suite", project::suite(p, o))
+        ui::kv("baza", project::base(p, o) + " @ " + project::base_ref(p, o))
+    end
+    ui::kv("desktop", project::desktop(p, o))
+    let dm: string = project::display_manager(p, o, "pc")
+    ui::kv("display manager", if dm == "" then "(domyślny dla środowiska)" else dm)
     ui::kv("iso-name", project::iso_name(p, o))
     let ts: [target::Target] = target::resolve_all(p, o, target::host_arch())
     let mut i: int = 0
     while i < array_len(ts) is
-        ui::kv("cel", target::label(ts[i]) + "  (" + to_string(array_len(packages::package_names(p, ts[i]))) + " pakietów)")
+        ui::kv("cel", target::label(ts[i]) + "  (" + to_string(array_len(if project::is_fedora(p, o) then packages::rpm_package_names(p, o) else packages::package_names(p, o, ts[i]))) + " pakietów)")
         i += 1
     end
     ui::kv("kolory", ui::level_name())
