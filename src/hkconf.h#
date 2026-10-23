@@ -380,3 +380,41 @@ pub fn locate_section(hk: HkFile, section: string) -> [int] is
     end
     return []
 end
+
+;; Nadpisanie wartości (flagi CLI typu --base / --desktop). Gdy klucza nie
+;; ma w pliku, jest dopisywany z offsetem -1 (bez podświetlenia w nidus).
+;; Sekcja `section` nie musi istnieć w pliku -- get/has patrzą tylko na klucze.
+pub fn override_value(hk: HkFile, section: string, key: string, value: string) -> HkFile is
+    let full: string = section + "." + key
+    let idx: int = index_of_key(hk, section, key)
+    let mut n: HkFile = hk
+    if idx >= 0 is
+        let mut vals: [string] = []
+        let mut i: int = 0
+        while i < array_len(hk.vals) is
+            if i == idx is vals.push(value) else is vals.push(hk.vals[i]) end
+            i += 1
+        end
+        n.vals = vals
+        return n
+    end
+    let mut keys: [string] = hk.keys
+    let mut vals2: [string] = hk.vals
+    let mut koff: [int] = hk.koff
+    let mut klen: [int] = hk.klen
+    let mut voff: [int] = hk.voff
+    let mut vlen: [int] = hk.vlen
+    keys.push(full)
+    vals2.push(value)
+    koff.push(-1)
+    klen.push(0)
+    voff.push(-1)
+    vlen.push(0)
+    n.keys = keys
+    n.vals = vals2
+    n.koff = koff
+    n.klen = klen
+    n.voff = voff
+    n.vlen = vlen
+    return n
+end
