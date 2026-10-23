@@ -13,6 +13,10 @@ mod scriptrunner
 mod completions
 mod version
 mod ui
+mod fedora
+mod livemarkers
+mod systemcfg
+mod sh
 
 ;; Wbudowane testy (`legendaryos-builder selftest`). Sprawdzają czyste
 ;; funkcje -- bez sieci, live-build ani roota. Kod wyjścia != 0 = porażka.
@@ -55,6 +59,91 @@ fn first_off(v: project::ValidationResult, code: string) -> int is
         i += 1
     end
     return -1
+end
+
+;; ── Blue Environment, sdm, znaczniki .live*, baza Fedora ──
+fn run_blue_fedora(c0: Counter) -> Counter is
+    let mut c: Counter = c0
+    let o: opts::Options = opts::defaults()
+    let cfg_h: string = "[project]\n-> name => LegendaryOS\n-> tag => stable\n-> targets => [pc:amd64, phone:arm64:pinephone]\n[release]\n-> base => hackeros\n[packages]\n-> desktop => blue-environment\n[mobile]\n-> shell => blue-environment\n"
+    let ph: project::Project = sample_project(cfg_h)
+    let th: [target::Target] = target::resolve_all(ph, o, "amd64")
+
+    ;; pakiety + display manager
+    let pk: [string] = packages::package_names(ph, o, th[0])
+    c = check(c, "blue pc: pakiet blue-environment", array_contains(pk, "blue-environment"))
+    c = check(c, "blue pc: domyślny DM = sdm", array_contains(pk, "sdm") && project::display_manager(ph, o, "pc") == "sdm")
+    c = check(c, "blue pc: bez task-xfce", !array_contains(pk, "task-xfce-desktop"))
+    c = check(c, "blue pc: Blue Installer zamiast calamares", !array_contains(pk, "calamares") && array_contains(pk, "rsync") && array_contains(pk, "parted"))
+    let pkm: [string] = packages::package_names(ph, o, th[1])
+    c = check(c, "blue phone: pakiet telefoniczny", array_contains(pkm, version::blue_phone_package()))
+    c = check(c, "blue phone: DM = sdm", array_contains(pkm, "sdm") && !array_contains(pkm, "phosh"))
+    let px: project::Project = sample_project("[project]\n-> name => X\n[packages]\n-> desktop => xfce\n")
+    c = check(c, "xfce: brak domyślnego DM", project::display_manager(px, o, "pc") == "")
+    let pn: project::Project = sample_project("[project]\n-> name => X\n[packages]\n-> desktop => blue-environment\n-> display-manager => none\n")
+    c = check(c, "display-manager none", project::display_manager(pn, o, "pc") == "")
+    let pg: project::Project = sample_project("[project]\n-> name => X\n[packages]\n-> desktop => blue-environment\n-> display-manager => gdm\n")
+    c = check(c, "display-manager jawny", project::display_manager(pg, o, "pc") == "gdm")
+
+    ;; znaczniki .live
+    let m: [string] = livemarkers::marker_names(ph, o, th[0])
+    c = check(c, "live hackeros: .live + .live-legendaryos", array_len(m) == 2 && m[0] == ".live" && m[1] == ".live-legendaryos")
+    c = check(c, "live: telefon bez znaczników", array_len(livemarkers::marker_names(ph, o, th[1])) == 0)
+    c = check(c, "live: xfce (auto) bez znaczników", array_len(livemarkers::marker_names(px, o, target::make(px, o, "pc", "amd64", "", "amd64"))) == 0)
+    let pt: project::Project = sample_project("[project]\n-> name => X\n[packages]\n-> desktop => xfce\n[live]\n-> markers => true\n")
+    c = check(c, "live: markers => true wymusza", array_len(livemarkers::marker_names(pt, o, target::make(pt, o, "pc", "amd64", "", "amd64"))) == 2)
+
+    ;; baza Fedora
+    let cfg_f: string = "[project]\n-> name => LegendaryOS\n-> tag => stable\n-> version => 1.0\n-> targets => [pc:amd64]\n[release]\n-> base => fedora\n[fedora]\n-> version => 44\n[container]\n-> registry => ghcr.io/legendaryos-linux-system\n-> image => legendaryos\n[system]\n-> timezone => Europe/Warsaw\n-> services-enable => [sshd]\n[packages]\n-> desktop => blue-environment\n-> include => [vim]\n"
+    let pf: project::Project = sample_project(cfg_f)
+    let tf: [target::Target] = target::resolve_all(pf, o, "amd64")
+    c = check(c, "fedora: baza rozpoznana", project::is_fedora(pf, o) && project::build_mode(pf, o) == "bootc")
+    let mf: [string] = livemarkers::marker_names(pf, o, tf[0])
+    c = check(c, "live fedora: 3 znaczniki", array_len(mf) == 3 && mf[2] == ".live-fedora-legendaryos")
+    c = check(c, "fedora: obraz bazowy", fedora::base_image(pf) == "quay.io/fedora-ostree-desktops/silverblue:44")
+    c = check(c, "fedora: nazwa obrazu", fedora::image_ref(pf) == "ghcr.io/legendaryos-linux-system/legendaryos:stable")
+    let cf: string = fedora::containerfile(pf, o, tf[0])
+    c = check(c, "containerfile: FROM", string_find(cf, "FROM quay.io/fedora-ostree-desktops/silverblue:44") >= 0)
+    c = check(c, "containerfile: dnf install blue+sdm", string_find(cf, "'blue-environment'") >= 0 && string_find(cf, "'sdm'") >= 0 && string_find(cf, "'vim'") >= 0)
+    c = check(c, "containerfile: nakładka", string_find(cf, "COPY includes.chroot_after_packages/ /") >= 0)
+    c = check(c, "containerfile: display-manager.service -> sdm", string_find(cf, "/usr/lib/systemd/system/sdm.service") >= 0)
+    c = check(c, "containerfile: strefa czasowa + usługa", string_find(cf, "Europe/Warsaw") >= 0 && string_find(cf, "sshd.service") >= 0)
+    let ba: [string] = fedora::bib_args(pf, tf[0], "/x/bib-config.toml")
+    c = check(c, "bib: anaconda-iso + obraz", array_contains(ba, "anaconda-iso") && array_contains(ba, "ghcr.io/legendaryos-linux-system/legendaryos:stable"))
+    c = check(c, "fedora: pakiety rpm", array_contains(packages::rpm_package_names(pf, o), "blue-environment") && array_contains(packages::rpm_package_names(pf, o), "sdm"))
+    let osr: string = identity::os_release(pf, o)
+    c = check(c, "os-release fedora: ID_LIKE i VERSION_ID", string_find(osr, "ID_LIKE=fedora") >= 0 && string_find(osr, "VERSION_ID=\"44\"") >= 0)
+    c = check(c, "os-release hackeros: ID_LIKE=debian", string_find(identity::os_release(ph, o), "ID_LIKE=debian") >= 0)
+
+    ;; nadpisania z flag
+    let mut o_f: opts::Options = opts::defaults()
+    o_f.base = "fedora"
+    o_f.desktop = "blue-environment"
+    let pov: project::Project = project::apply_overrides(sample_project("[project]\n-> name => X\n[release]\n-> base => hackeros\n"), o_f)
+    c = check(c, "--base nadpisuje config", project::is_fedora(pov, o_f) && hkconf::get(pov.config, "release", "base") == "fedora")
+    c = check(c, "--desktop dopisuje klucz", project::desktop(pov, o_f) == "blue-environment")
+
+    ;; walidacja
+    let bad1: project::ValidationResult = project::validate(sample_project("[project]\n-> name => X\n-> targets => [phone:arm64:pinephone]\n[release]\n-> base => fedora\n"))
+    c = check(c, "walidacja: fedora + telefon", count_msgs(bad1, "config::fedora_phone") == 1)
+    let bad2: project::ValidationResult = project::validate(sample_project("[project]\n-> name => X\n[release]\n-> base => hackeros\n[packages]\n-> desktop => cosmic\n"))
+    c = check(c, "walidacja: cosmic tylko na fedorze", count_msgs(bad2, "config::desktop_base") == 1)
+    let bad3: project::ValidationResult = project::validate(sample_project("[project]\n-> name => X\n[release]\n-> base => fedra\n"))
+    c = check(c, "walidacja: literówka bazy", count_msgs(bad3, "config::base") >= 1)
+    let bad4: project::ValidationResult = project::validate(sample_project("[project]\n-> name => X\n[packages]\n-> display-manager => sdn\n"))
+    c = check(c, "walidacja: zły display-manager", count_msgs(bad4, "config::display-manager") == 1)
+    let ok1: project::ValidationResult = project::validate(sample_project(cfg_h))
+    c = check(c, "walidacja: blue-environment (pc+phone) bez błędów configu", count_msgs(ok1, "config::desktop") == 0 && count_msgs(ok1, "config::shell") == 0)
+
+    ;; skrypty puste
+    sh::write_text("/tmp/lo-selftest-blank.hl", "#!/usr/bin/hl\n/// komentarz\n\n")
+    sh::write_text("/tmp/lo-selftest-code.hl", "#!/usr/bin/hl\nusing <gen 2>\n")
+    c = check(c, "skrypt pusty = pomijany", scriptrunner::is_blank_script("/tmp/lo-selftest-blank.hl"))
+    c = check(c, "skrypt z kodem = uruchamiany", !scriptrunner::is_blank_script("/tmp/lo-selftest-code.hl"))
+
+    ;; completions
+    c = check(c, "completions: --base/--desktop", string_find(completions::bash(), "--base") >= 0 && string_find(completions::bash(), "blue-environment") >= 0)
+    return c
 end
 
 pub fn run() -> int is
@@ -106,15 +195,15 @@ pub fn run() -> int is
     c = check(c, "filtr --arch arm64", array_len(target::resolve_all(p, o3, "amd64")) == 2)
 
     ;; ── pakiety ──
-    let pk_pc: [string] = packages::package_names(p, ts[0])
-    let pk_ph: [string] = packages::package_names(p, ts[2])
+    let pk_pc: [string] = packages::package_names(p, o, ts[0])
+    let pk_ph: [string] = packages::package_names(p, o, ts[2])
     c = check(c, "pakiety pc: calamares", array_contains(pk_pc, "calamares"))
     c = check(c, "pakiety pc: include", array_contains(pk_pc, "vim"))
     c = check(c, "pakiety pc: exclude", !array_contains(pk_pc, "os-prober"))
     c = check(c, "pakiety phone: phosh", array_contains(pk_ph, "phosh"))
     c = check(c, "pakiety phone: u-boot", array_contains(pk_ph, "u-boot-sunxi"))
     c = check(c, "pakiety phone: bez calamares", !array_contains(pk_ph, "calamares"))
-    c = check(c, "pakiety arm64 pc: grub-efi-arm64", array_contains(packages::package_names(p, ts[1]), "grub-efi-arm64-bin"))
+    c = check(c, "pakiety arm64 pc: grub-efi-arm64", array_contains(packages::package_names(p, o, ts[1]), "grub-efi-arm64-bin"))
 
     ;; ── lb config ──
     let args_pc: [string] = livebuild::lb_args(p, o, ts[0])
@@ -141,6 +230,8 @@ pub fn run() -> int is
     ;; ── skrypty i completions ──
     c = check(c, "completions: bash", string_find(completions::bash(), "complete -F") >= 0)
     c = check(c, "completions: urządzenia", string_find(completions::bash(), "pinephone") >= 0)
+
+    c = run_blue_fedora(c)
 
     ui::blank()
     if c.fail == 0 is
