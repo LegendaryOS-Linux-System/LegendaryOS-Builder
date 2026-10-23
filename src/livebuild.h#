@@ -11,6 +11,8 @@ mod packages
 mod gitsync
 mod image
 mod text
+mod fedora
+mod livemarkers
 
 ;; Etapy budowy jednego celu (komputer albo telefon, jedna architektura):
 ;;   stage -> lb-config -> lb-build -> finish
@@ -119,26 +121,29 @@ end
 
 ;; Etap 1: złóż nakładkę (baza + branding + tożsamość + pakiety + files/).
 pub fn stage(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if project::is_fedora(p, o) is return fedora::stage(p, o, t) end
     let st: string = staging_dir(t)
     sh::rm_rf(st)
     sh::mkdir_p(st)
 
     ;; kolejność ma znaczenie: późniejsze nadpisują wcześniejsze
     if !prepare_base(p, o, t) is return false end
-    let nb: int = branding::stage(p, t, st)
+    let nb: int = branding::stage(p, o, t, st)
     let ni: int = identity::stage(p, o, st)
-    let np: int = packages::stage(p, t, st)
+    let np: int = packages::stage(p, o, t, st)
+    let nl: int = livemarkers::stage(p, o, t, st)
     let files: string = path_join(p.root, "files")
     if fs_is_dir(files) is
         sh::copy_tree(files, path_join(st, "includes.chroot_after_packages"))
     end
     ui::ok("nakładka [" + target::label(t) + "]: branding " + to_string(nb) + ", tożsamość " + to_string(ni) +
-           ", pakiety " + to_string(np) + " -> " + st)
+           ", pakiety " + to_string(np) + ", znaczniki live " + to_string(nl) + " -> " + st)
     return true
 end
 
 ;; Etap 2: `lb config` + wczytanie nakładki do config/.
 pub fn lb_config(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if project::is_fedora(p, o) is return fedora::configure(p, o, t) end
     if !sh::tool_exists("lb") && !o.dry_run is
         ui::fail("nie znaleziono `lb` (live-build) w PATH -- zainstaluj pakiet `live-build`")
         return false
@@ -169,6 +174,7 @@ end
 
 ;; Etap 3: `lb build` (wymaga roota). Log w <work>/build.log.
 pub fn lb_build(p: project::Project, o: opts::Options, t: target::Target) -> bool is
+    if project::is_fedora(p, o) is return fedora::build(p, o, t) end
     if !o.dry_run is
         if !sh::tool_exists("lb") is
             ui::fail("nie znaleziono `lb` (live-build)")
@@ -205,6 +211,7 @@ end
 ;; Zwraca listę nazw plików wynikowych.
 pub fn finish(p: project::Project, o: opts::Options, t: target::Target) -> [string] is
     let name: string = out_name(p, o, t)
+    if project::is_fedora(p, o) is return fedora::finish(p, o, t, name) end
     let mut produced: [string] = []
     sh::mkdir_p(t.out_dir)
     let dev: devices::Device = devices::find(t.device)
