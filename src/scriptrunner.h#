@@ -28,11 +28,41 @@ pub fn list_scripts(scripts_dir: string) -> [string] is
     return out
 end
 
+;; Skrypt bez żadnej treści wykonywalnej (puste linie, komentarze `///`, `//`, `;;`, `#`)
+;; nie wymaga interpretera -- pozwala budować w CI bez `hl`, gdy skrypty są jeszcze puste.
+pub fn is_blank_script(path: string) -> bool is
+    let lines: [string] = string_split(fs_read(path), "\n")
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let l: string = string_trim(lines[i])
+        if l != "" && !string_starts_with(l, "#") && !string_starts_with(l, "//") && !string_starts_with(l, ";;") is
+            return false
+        end
+        i += 1
+    end
+    return true
+end
+
+fn count_runnable(scripts_dir: string, names: [string]) -> int is
+    let mut n: int = 0
+    let mut i: int = 0
+    while i < array_len(names) is
+        if !is_blank_script(path_join(scripts_dir, names[i])) is n += 1 end
+        i += 1
+    end
+    return n
+end
+
 pub fn run_all(root: string, o: opts::Options) -> [ScriptResult] is
     let mut results: [ScriptResult] = []
     let names: [string] = list_scripts(path_join(root, "scripts"))
     if array_len(names) == 0 is
         ui::muted("scripts/: brak skryptów .hl -- pomijam")
+        return results
+    end
+    let sdir: string = path_join(root, "scripts")
+    if count_runnable(sdir, names) == 0 is
+        ui::muted("scripts/: wszystkie skrypty .hl są puste -- pomijam")
         return results
     end
     if !sh::tool_exists("hl") && !o.dry_run is
@@ -48,10 +78,14 @@ pub fn run_all(root: string, o: opts::Options) -> [ScriptResult] is
         ui::step(i + 1, array_len(names), "scripts/" + names[i])
         let t0: int = sh::now()
         let mut rc: int = 0
-        if o.dry_run is
-            ui::muted("[dry-run] hl scripts/" + names[i])
+        if is_blank_script(path_join(sdir, names[i])) is
+            ui::muted("scripts/" + names[i] + ": pusty -- pomijam")
         else is
-            rc = sh::in_dir(root, "hl " + sh::sq("scripts/" + names[i]))
+            if o.dry_run is
+                ui::muted("[dry-run] hl scripts/" + names[i])
+            else is
+                rc = sh::in_dir(root, "hl " + sh::sq("scripts/" + names[i]))
+            end
         end
         let secs: int = sh::now() - t0
         results.push(ScriptResult { name: names[i], ok: rc == 0, seconds: secs })
