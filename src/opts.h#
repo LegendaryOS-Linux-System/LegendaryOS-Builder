@@ -12,6 +12,8 @@ pub struct Options is
     pub suite:         string   ;; nadpisanie [release] -> suite
     pub ref_name:      string   ;; nadpisanie [release] -> base-ref
     pub iso_name:      string   ;; nadpisanie [build] -> iso-name
+    pub base:          string   ;; nadpisanie [release] -> base (hackeros | fedora)
+    pub desktop:       string   ;; nadpisanie [packages] -> desktop
     pub target:        string   ;; filtr celów: "pc" | "phone" | pełny zapis "phone:arm64:pinephone"
     pub kind:          string   ;; `new`: pc | phone | both
     pub device:        string   ;; `new`: id urządzenia
@@ -24,6 +26,7 @@ pub fn defaults() -> Options is
         assume_yes: false, strict: false, clean_first: false, no_color: false,
         keep_going: false,
         arch: "", suite: "", ref_name: "", iso_name: "",
+        base: "", desktop: "",
         target: "", kind: "", device: "", shell: "",
     }
 end
