@@ -115,7 +115,7 @@ fn prepare_base(p: project::Project, o: opts::Options, t: target::Target) -> boo
     let n: int = gitsync::import_base(base_dir(t), staging_dir(t), what, hkconf::get(p.config, "base", "helper"))
     let info: string = gitsync::head_info(base_dir(t))
     sh::write_text(path_join(staging_dir(t), "base.info"), info + "\n")
-    ui::ok("baza HackerOS @ " + info + " -- zaimportowano " + to_string(n) + " plików (" + str_join(what, ", ") + ")")
+    ui::ok("baza HackerOS @ " + info + " -- zaimportowano " + to_string(n) + " plików (" + what.join(", ") + ")")
     return true
 end
 
@@ -247,7 +247,7 @@ pub fn finish(p: project::Project, o: opts::Options, t: target::Target) -> [stri
     end
 
     if !o.dry_run && array_len(produced) > 0 is
-        sh::in_dir(t.out_dir, "sha256sum " + str_join(produced, " ") + " > " + sh::sq(name + ".SHA256SUMS"))
+        sh::in_dir(t.out_dir, "sha256sum " + produced.join(" ") + " > " + sh::sq(name + ".SHA256SUMS"))
         produced.push(name + ".SHA256SUMS")
     end
     return produced
