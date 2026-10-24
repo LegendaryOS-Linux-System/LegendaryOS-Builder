@@ -127,7 +127,7 @@ pub fn stage(p: project::Project, o: opts::Options, t: target::Target, cfg_dir: 
 
     ;; własne listy projektu (package-lists/*.list.chroot|binary)
     let own: string = path_join(p.root, "package-lists")
-    if fs_is_dir(own) is
+    if is_dir(own) is
         sh::copy_tree(own, path_join(cfg_dir, "package-lists"))
     end
     return array_len(names)
