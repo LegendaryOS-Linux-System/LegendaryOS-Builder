@@ -11,7 +11,7 @@ mod ui
 pub fn cache_dir() -> string is
     let over: string = env_get("LEGENDARYOS_CACHE")
     if over != "" is return over end
-    return path_join(env_home(), ".cache/legendaryos-builder")
+    return path_join(env_get("HOME"), ".cache/legendaryos-builder")
 end
 
 pub fn mirror_dir() -> string is
