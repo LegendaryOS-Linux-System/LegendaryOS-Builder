@@ -19,7 +19,7 @@ pub fn mirror_dir() -> string is
 end
 
 pub fn mirror_exists() -> bool is
-    return fs_is_dir(path_join(mirror_dir(), ".git"))
+    return is_dir(path_join(mirror_dir(), ".git"))
 end
 
 ;; Token (jeśli jest) przekazujemy gitowi przez zmienne środowiskowe
@@ -128,7 +128,7 @@ end
 pub fn import_base(snapshot: string, cfg_dir: string, what: [string], helper: string) -> int is
     let mut root: string = snapshot
     if helper != "" is root = path_join(path_join(snapshot, "helpers"), helper) end
-    if !fs_is_dir(root) is
+    if !is_dir(root) is
         ui::warn("baza: nie znaleziono " + root + " -- pomijam import")
         return 0
     end
