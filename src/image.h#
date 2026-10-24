@@ -132,7 +132,7 @@ pub fn make_raw_img(p: project::Project, t: target::Target, o: opts::Options, de
         let parts: [string] = string_split(dev.blobs[i], "@")
         let src: string = chroot + parts[0]
         if !o.dry_run && !fs_is_file(src) is
-            ui::fail("brak bloba U-Boota " + parts[0] + " w rootfs (pakiet " + str_join(dev.packages, "/") + "?)")
+            ui::fail("brak bloba U-Boota " + parts[0] + " w rootfs (pakiet " + dev.packages.join("/") + "?)")
             return false
         end
         if !run_step(o, "zapis bloba " + parts[0] + " @ sektor " + parts[1],
