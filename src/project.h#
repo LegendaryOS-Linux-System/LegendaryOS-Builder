@@ -272,7 +272,7 @@ end
 fn check_branding(root: string, v: ValidationResult) -> ValidationResult is
     let dir: string = path_join(root, "branding")
     let mut result: ValidationResult = v
-    if !fs_is_dir(dir) is
+    if !is_dir(dir) is
         return plain(result, true, "layout::branding", "brak katalogu branding/", "")
     end
     let required: [string] = required_branding_files()
@@ -302,7 +302,7 @@ end
 fn check_scripts(root: string, v: ValidationResult) -> ValidationResult is
     let dir: string = path_join(root, "scripts")
     let mut result: ValidationResult = v
-    if !fs_is_dir(dir) is
+    if !is_dir(dir) is
         return plain(result, true, "layout::scripts", "brak katalogu scripts/", "")
     end
     let names: [string] = string_split(sh::capture("ls -1A " + sh::sq(dir) + " 2>/dev/null"), "\n")
@@ -322,7 +322,7 @@ fn check_scripts(root: string, v: ValidationResult) -> ValidationResult is
 end
 
 fn check_files_dir(root: string, v: ValidationResult) -> ValidationResult is
-    if !fs_is_dir(path_join(root, "files")) is
+    if !is_dir(path_join(root, "files")) is
         return plain(v, true, "layout::files", "brak katalogu files/ (nakładka after-packages)",
                      "utwórz pusty katalog files/")
     end
@@ -340,7 +340,7 @@ end
 fn check_package_lists(root: string, v: ValidationResult) -> ValidationResult is
     let dir: string = path_join(root, "package-lists")
     let mut result: ValidationResult = v
-    if !fs_is_dir(dir) is return result end
+    if !is_dir(dir) is return result end
     let names: [string] = string_split(sh::capture("ls -1A " + sh::sq(dir) + " 2>/dev/null"), "\n")
     let mut i: int = 0
     while i < array_len(names) is
