@@ -51,7 +51,7 @@ pub fn write_notes(p: project::Project, o: opts::Options, targets: [target::Targ
     let out_dir: string = path_join(project::build_dir(p), "out")
     let mut info: string = ""
     let mut log: [string] = []
-    if !o.no_base && fs_is_dir(base_dir) is
+    if !o.no_base && is_dir(base_dir) is
         info = gitsync::head_info(base_dir)
         log = gitsync::base_log(base_dir, 10)
     end
