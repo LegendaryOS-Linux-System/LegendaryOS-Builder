@@ -299,7 +299,7 @@ fn cmd_build(pr: Parsed) -> int is
     ui::title("Plan")
     let mut i: int = 0
     while i < array_len(ts) is
-        ui::kv(ts[i].kind, target::label(ts[i]) + "  ->  " + str_join(ts[i].images, ", "))
+        ui::kv(ts[i].kind, target::label(ts[i]) + "  ->  " + ts[i].images.join(", "))
         i += 1
     end
 
@@ -383,7 +383,7 @@ fn cmd_targets(pr: Parsed) -> int is
         let t: target::Target = ts[i]
         let mut extra: string = ""
         if t.qemu_arch != "" is extra = "  [qemu: " + t.qemu_static + "]" end
-        ui::kv(t.kind, target::label(t) + "  ->  " + str_join(t.images, ", ") + extra)
+        ui::kv(t.kind, target::label(t) + "  ->  " + t.images.join(", ") + extra)
         i += 1
     end
     if array_len(ts) == 0 is ui::warn("brak celów") end
