@@ -25,7 +25,7 @@ pub fn notes_text(p: project::Project, o: opts::Options, targets: [target::Targe
         labels.push(target::label(targets[i]))
         i += 1
     end
-    s = s + "- Cele: " + str_join(labels, "; ") + "\n"
+    s = s + "- Cele: " + labels.join("; ") + "\n"
     if base_info != "" is
         s = s + "- Baza HackerOS: " + project::base_ref(p, o) + " @ " + base_info + "\n"
     end
