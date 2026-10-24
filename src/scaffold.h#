@@ -172,14 +172,14 @@ pub fn create(dir: string, o: opts::Options) -> bool is
     let mut device: string = o.device
     if (kind == "phone" || kind == "both") && device == "" is device = "pinephone" end
     if device != "" && devices::find(device).id == "" is
-        ui::fail("nieznane urządzenie '" + device + "' (dostępne: " + str_join(devices::ids(), ", ") + ")")
+        ui::fail("nieznane urządzenie '" + device + "' (dostępne: " + devices::ids().join(", ") + ")")
         return false
     end
 
     let mut base: string = o.base
     if base == "" is base = "hackeros" end
     if !array_contains(version::known_bases(), base) is
-        ui::fail("--base musi być: " + str_join(version::known_bases(), ", ") + " (podano '" + base + "')")
+        ui::fail("--base musi być: " + version::known_bases().join(", ") + " (podano '" + base + "')")
         return false
     end
     if base == "fedora" && kind != "pc" is
