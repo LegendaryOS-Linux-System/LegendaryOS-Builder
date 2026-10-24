@@ -225,7 +225,7 @@ pub fn parse_text(text: string, path: string) -> HkFile is
 
         let arrow_pos: int = string_find(raw, "->")
         let kstart: int = skip_ws_from(raw, arrow_pos + 2)
-        let mut body: string = line
+        let mut body: string = ""
         if is_sub is
             body = string_trim(string_slice(line, 3, string_len(line)))
         else is
@@ -318,9 +318,11 @@ pub fn get_list(hk: HkFile, section: string, key: string) -> [string] is
     let raw: string = string_trim(get(hk, section, key))
     let mut out: [string] = []
     if raw == "" is return out end
-    let mut inner: string = raw
+    let mut inner: string = ""
     if string_starts_with(raw, "[") && string_ends_with(raw, "]") is
         inner = string_slice(raw, 1, string_len(raw) - 1)
+    else is
+        inner = string_slice(raw, 0, string_len(raw))
     end
     let parts: [string] = string_split(inner, ",")
     let mut i: int = 0
