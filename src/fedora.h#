@@ -159,7 +159,7 @@ pub fn stage(p: project::Project, o: opts::Options, t: target::Target) -> bool i
     let ni: int = identity::stage(p, o, st)
     let nm: int = livemarkers::stage(p, o, t, st)
     let files: string = path_join(p.root, "files")
-    if fs_is_dir(files) is
+    if is_dir(files) is
         sh::copy_tree(files, path_join(st, "includes.chroot_after_packages"))
     end
     sh::write_text(path_join(st, "Containerfile"), containerfile(p, o, t))
