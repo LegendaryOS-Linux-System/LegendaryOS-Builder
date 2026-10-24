@@ -84,7 +84,7 @@ pub fn run_checks(p: project::Project, has_project: bool, o: opts::Options) -> i
         ui::title("Cele projektu")
         let mut k: int = 0
         while k < array_len(targets) is
-            ui::info(target::label(targets[k]) + "  ->  " + str_join(targets[k].images, ", "))
+            ui::info(target::label(targets[k]) + "  ->  " + targets[k].images.join(", "))
             k += 1
         end
         if array_len(targets) == 0 is
