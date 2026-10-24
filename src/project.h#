@@ -289,7 +289,7 @@ fn check_branding(root: string, v: ValidationResult) -> ValidationResult is
     end
     if array_len(small) > 0 is
         result = plain(result, false, "branding::placeholder",
-            "branding/: " + str_join(small, ", ") + " wyglądają na placeholdery (< 64 px)",
+            "branding/: " + small.join(", ") + " wyglądają na placeholdery (< 64 px)",
             "podmień na docelową grafikę przed właściwym buildem")
     end
     return result
@@ -412,7 +412,7 @@ fn check_enum(v: ValidationResult, hk: hkconf::HkFile, section: string, key: str
               value: string, allowed: [string], is_err: bool) -> ValidationResult is
     if array_contains(allowed, value) is return v end
     let near: string = text::suggest(value, allowed)
-    let mut help: string = "dozwolone: " + str_join(allowed, ", ")
+    let mut help: string = "dozwolone: " + allowed.join(", ")
     if near != "" is help = "czy chodziło o `" + near + "`? " + help end
     return at(v, is_err, "config::" + key, "nieprawidłowa wartość `" + value + "` w [" + section + "] -> " + key,
               hk, hkconf::locate_value(hk, section, key), "tu", help)
@@ -436,7 +436,7 @@ fn check_unknown(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
     while i < array_len(secs) is
         if !array_contains(known_sections(), secs[i]) is
             let near: string = text::suggest(secs[i], known_sections())
-            let mut help: string = "znane sekcje: " + str_join(known_sections(), ", ")
+            let mut help: string = "znane sekcje: " + known_sections().join(", ")
             if near != "" is help = "czy chodziło o `[" + near + "]`?" end
             result = at(result, false, "config::unknown_section", "nieznana sekcja [" + secs[i] + "]",
                         hk, hkconf::locate_section(hk, secs[i]), "ta sekcja jest ignorowana", help)
@@ -447,7 +447,7 @@ fn check_unknown(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
                 let base: string = (string_split(keys[j], "."))[0]
                 if !array_contains(known_keys(secs[i]), base) is
                     let near: string = text::suggest(base, known_keys(secs[i]))
-                    let mut help: string = "znane klucze: " + str_join(known_keys(secs[i]), ", ")
+                    let mut help: string = "znane klucze: " + known_keys(secs[i]).join(", ")
                     if near != "" is help = "czy chodziło o `" + near + "`?" end
                     result = at(result, false, "config::unknown_key",
                                 "nieznany klucz [" + secs[i] + "] -> " + base, hk,
@@ -475,13 +475,13 @@ fn check_target_specs(hk: hkconf::HkFile, specs: [string], v: ValidationResult) 
         else is
             if !array_contains(version::known_arches(), sp[1]) is
                 result = at(result, true, "config::targets", "nieznana architektura `" + sp[1] + "` w celu `" + specs[i] + "`",
-                            hk, loc, "tu", "dozwolone: " + str_join(version::known_arches(), ", "))
+                            hk, loc, "tu", "dozwolone: " + version::known_arches().join(", "))
             end
             if sp[0] == "phone" is
                 let dev: devices::Device = devices::find(sp[2])
                 if dev.id == "" is
                     let near: string = text::suggest(sp[2], devices::ids())
-                    let mut help: string = "dostępne: " + str_join(devices::ids(), ", ")
+                    let mut help: string = "dostępne: " + devices::ids().join(", ")
                     if near != "" is help = "czy chodziło o `" + near + "`? " + help end
                     result = at(result, true, "config::device", "nieznane urządzenie `" + sp[2] + "` w celu `" + specs[i] + "`",
                                 hk, loc, "tu", help)
@@ -538,19 +538,19 @@ fn check_targets(hk: hkconf::HkFile, v: ValidationResult) -> ValidationResult is
         if dev_id == "" is
             result = at(result, true, "config::device", "kind => phone wymaga [mobile] -> device",
                         hk, hkconf::locate_value(hk, "target", "kind"), "tryb telefonu",
-                        "dostępne urządzenia: " + str_join(devices::ids(), ", "))
+                        "dostępne urządzenia: " + devices::ids().join(", "))
         else is
             let dev: devices::Device = devices::find(dev_id)
             if dev.id == "" is
                 let near: string = text::suggest(dev_id, devices::ids())
-                let mut help: string = "dostępne: " + str_join(devices::ids(), ", ")
+                let mut help: string = "dostępne: " + devices::ids().join(", ")
                 if near != "" is help = "czy chodziło o `" + near + "`? " + help end
                 result = at(result, true, "config::device", "nieznane urządzenie `" + dev_id + "`",
                             hk, hkconf::locate_value(hk, "mobile", "device"), "tu", help)
             else is
                 if array_len(arches) > 0 && !array_contains(arches, dev.arch) is
                     result = at(result, true, "config::device_arch",
-                                "urządzenie `" + dev_id + "` jest " + dev.arch + ", a [project] -> arch to " + str_join(arches, ", "),
+                                "urządzenie `" + dev_id + "` jest " + dev.arch + ", a [project] -> arch to " + arches.join(", "),
                                 hk, hkconf::locate_value(hk, "project", "arch"), "dodaj " + dev.arch,
                                 "np. `-> arch => [amd64, " + dev.arch + "]`")
                 end
