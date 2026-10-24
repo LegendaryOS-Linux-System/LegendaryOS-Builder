@@ -22,13 +22,13 @@ pub fn bash() -> string is
     o = o + "        --base) COMPREPLY=($(compgen -W \"hackeros fedora\" -- \"$cur\")); return ;;\n"
     o = o + "        --desktop) COMPREPLY=($(compgen -W \"none xfce gnome kde cosmic blue-environment\" -- \"$cur\")); return ;;\n"
     o = o + "        --kind) COMPREPLY=($(compgen -W \"pc phone both\" -- \"$cur\")); return ;;\n"
-    o = o + "        --device) COMPREPLY=($(compgen -W \"" + str_join(devices::ids(), " ") + "\" -- \"$cur\")); return ;;\n"
+    o = o + "        --device) COMPREPLY=($(compgen -W \"" + devices::ids().join(" ") + "\" -- \"$cur\")); return ;;\n"
     o = o + "        completions) COMPREPLY=($(compgen -W \"bash zsh fish\" -- \"$cur\")); return ;;\n"
     o = o + "    esac\n"
     o = o + "    if [ \"$COMP_CWORD\" -eq 1 ]; then\n"
-    o = o + "        COMPREPLY=($(compgen -W \"" + str_join(commands(), " ") + "\" -- \"$cur\"))\n"
+    o = o + "        COMPREPLY=($(compgen -W \"" + commands().join(" ") + "\" -- \"$cur\"))\n"
     o = o + "    else\n"
-    o = o + "        COMPREPLY=($(compgen -W \"" + str_join(flags(), " ") + "\" -- \"$cur\") $(compgen -d -- \"$cur\"))\n"
+    o = o + "        COMPREPLY=($(compgen -W \"" + flags().join(" ") + "\" -- \"$cur\") $(compgen -d -- \"$cur\"))\n"
     o = o + "    fi\n}\ncomplete -F _legendaryos_builder legendaryos-builder\n"
     return o
 end
@@ -36,8 +36,8 @@ end
 pub fn zsh() -> string is
     let mut o: string = "#compdef legendaryos-builder\n_legendaryos_builder() {\n"
     o = o + "    local -a cmds flags\n"
-    o = o + "    cmds=(" + str_join(commands(), " ") + ")\n"
-    o = o + "    flags=(" + str_join(flags(), " ") + ")\n"
+    o = o + "    cmds=(" + commands().join(" ") + ")\n"
+    o = o + "    flags=(" + flags().join(" ") + ")\n"
     o = o + "    if (( CURRENT == 2 )); then\n        _describe 'komenda' cmds\n    else\n        _describe 'opcja' flags\n        _files -/\n    fi\n}\n"
     o = o + "_legendaryos_builder \"$@\"\n"
     return o
