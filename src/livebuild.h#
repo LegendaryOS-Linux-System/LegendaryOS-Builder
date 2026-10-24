@@ -133,7 +133,7 @@ pub fn stage(p: project::Project, o: opts::Options, t: target::Target) -> bool i
     let np: int = packages::stage(p, o, t, st)
     let nl: int = livemarkers::stage(p, o, t, st)
     let files: string = path_join(p.root, "files")
-    if fs_is_dir(files) is
+    if is_dir(files) is
         sh::copy_tree(files, path_join(st, "includes.chroot_after_packages"))
     end
     ui::ok("nakładka [" + target::label(t) + "]: branding " + to_string(nb) + ", tożsamość " + to_string(ni) +
