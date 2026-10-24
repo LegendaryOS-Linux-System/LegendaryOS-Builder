@@ -81,7 +81,7 @@ pub fn containerfile(p: project::Project, o: opts::Options, t: target::Target) -
             quoted.push(sh::sq(pk[i]))
             i += 1
         end
-        c = c + "RUN dnf -y install " + str_join(quoted, " ") + " && dnf clean all\n"
+        c = c + "RUN dnf -y install " + quoted.join(" ") + " && dnf clean all\n"
     end
 
     ;; nakładka "after packages": branding, tożsamość, .live*, files/ projektu
@@ -248,7 +248,7 @@ pub fn finish(p: project::Project, o: opts::Options, t: target::Target, name: st
     end
     produced.push(name + ".iso")
     if !o.dry_run is
-        sh::in_dir(t.out_dir, "sha256sum " + str_join(produced, " ") + " > " + sh::sq(name + ".SHA256SUMS"))
+        sh::in_dir(t.out_dir, "sha256sum " + produced.join(" ") + " > " + sh::sq(name + ".SHA256SUMS"))
         produced.push(name + ".SHA256SUMS")
     end
     return produced
