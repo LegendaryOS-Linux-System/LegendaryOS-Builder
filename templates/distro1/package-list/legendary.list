@@ -1,0 +1,10 @@
+dnf5
+rpm
+cpio
+git
+curl
+squashfs-tools
+squashfuse
+composefs
+cryptsetup
+podman
