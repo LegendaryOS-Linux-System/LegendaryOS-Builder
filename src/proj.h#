@@ -1,0 +1,238 @@
+use "std -> fs" from "fs"
+mod text
+mod sys
+mod hk
+mod ui
+
+;; Projekt dystrybucji LegendaryOS (katalog źródeł): config.hk + user.hk + branding/ files/ package-list/ scripts/.
+
+pub struct Project is
+    pub dir:            string
+    pub name:           string
+    pub id:             string
+    pub version:        string
+    pub arch:           string
+    pub channel:        string
+    pub base_release:   string
+    pub dnf:            string
+    pub zenitd_repo:    string
+    pub zenitd_script:  string
+    pub desktop:        string
+    pub dm:             string
+    pub formats:        [string]
+    pub oci_name:       string
+    pub org:            string
+    pub registry:       string
+    pub token:          string   ;; WARTOŚĆ tokenu (z env:NAZWA albo literalnie) — nigdy nie jest logowana
+    pub tools_catalog:  string
+    pub kernel_args:    string
+end
+
+pub struct LoadResult is
+    pub ok:      bool
+    pub project: Project
+end
+
+pub fn required_branding() -> [string] is
+    return ["banner.png", "logo-bg.png", "logo-bg.jpg", "logo.png", "notext-bg.png"]
+end
+
+fn empty_project(dir: string) -> Project is
+    return Project { dir: dir, name: "", id: "", version: "", arch: "", channel: "", base_release: "", dnf: "dnf5",
+        zenitd_repo: "", zenitd_script: "", desktop: "", dm: "", formats: [], oci_name: "", org: "", registry: "",
+        token: "", tools_catalog: "", kernel_args: "" }
+end
+
+fn load_hk(path: string) -> hk::ParseResult is
+    if !fs::exists(path) is return hk::ParseResult { ok: false, doc: hk::empty(), error: "brak pliku " + path } end
+    let src: string = fs::read(path)
+    let r: hk::ParseResult = hk::parse(src)
+    if !r.ok is ui::config_error(path, src, "", r.error, "składnia .hk: -> klucz => wartość") end
+    return r
+end
+
+;; `env:NAZWA` -> wartość zmiennej środowiskowej; inaczej wartość dosłowna.
+pub fn resolve_secret(v: string) -> string is
+    if text::starts_with(v, "env:") is return sys::getenv_or(v[4..v.len()], "") end
+    return v
+end
+
+pub fn abs_dir(dir: string) -> string is
+    let r: sys::Exec = sys::exec("realpath -m " + sys::sq(dir))
+    let t: string = text::trim(r.out)
+    if r.code != 0 || t == "" is return dir end
+    return t
+end
+
+pub fn load(dir0: string) -> LoadResult is
+    let dir: string = abs_dir(dir0)
+    let cfg: hk::ParseResult = load_hk(text::path_join(dir, "config.hk"))
+    if !cfg.ok is
+        if !text::contains(cfg.error, "linia") is ui::err(cfg.error) end
+        return LoadResult { ok: false, project: empty_project(dir) }
+    end
+    let usr: hk::ParseResult = load_hk(text::path_join(dir, "user.hk"))
+    if !usr.ok is
+        if !text::contains(usr.error, "linia") is ui::err(usr.error) end
+        return LoadResult { ok: false, project: empty_project(dir) }
+    end
+    let d: hk::Doc = cfg.doc
+    let u: hk::Doc = usr.doc
+    let mut formats: [string] = hk::get_list(d, "targets", "formats")
+    if formats.len() == 0 is formats = ["iso", "oci"] end
+    let org: string = hk::get(u, "user", "organization", hk::get(u, "user", "name", "legendaryos"))
+    let p: Project = Project { dir: dir,
+        name: hk::get(d, "distro", "name", "LegendaryOS"),
+        id: hk::get(d, "distro", "id", "legendaryos"),
+        version: hk::get(d, "distro", "version", "0.1.0"),
+        arch: hk::get(d, "distro", "arch", "x86_64"),
+        channel: hk::get(d, "distro", "channel", "rolling"),
+        base_release: hk::get(d, "base", "release", "43"),
+        dnf: hk::get(d, "base", "dnf", "dnf5"),
+        zenitd_repo: hk::get(d, "init", "zenitd_repo", "https://github.com/Zenit-Linux/zenitd"),
+        zenitd_script: hk::get(d, "init", "zenitd_install_script", "https://raw.githubusercontent.com/Zenit-Linux/zenitd/main/scripts/install.sh"),
+        desktop: hk::get(d, "desktop", "environment", "blue-environment"),
+        dm: hk::get(d, "desktop", "display_manager", "sddm"),
+        formats: formats,
+        oci_name: hk::get(d, "image", "oci_name", "legendaryos"),
+        org: org,
+        registry: hk::get(u, "user", "registry", "ghcr.io"),
+        token: resolve_secret(hk::get(u, "user", "token", "")),
+        tools_catalog: hk::get(d, "tools", "catalog", "files/usr/share/legendaryos/tools.hk"),
+        kernel_args: hk::get(d, "boot", "kernel_args", "quiet rhgb") }
+    return LoadResult { ok: true, project: p }
+end
+
+fn magic(path: string) -> string is
+    let r: sys::Exec = sys::exec("head -c 4 " + sys::sq(path) + " | od -An -tx1")
+    return text::trim(r.out)
+end
+
+;; Lista problemów projektu (pusta = OK).
+pub fn validate(p: Project) -> [string] is
+    let mut out: [string] = []
+    if p.version == "" || !text::contains(p.version, ".") is out.push("distro.version musi mieć postać X.Y.Z") end
+    if p.arch != "x86_64" && p.arch != "aarch64" is out.push("distro.arch musi być x86_64 albo aarch64") end
+    if p.channel != "rolling" && p.channel != "stable" is out.push("distro.channel: rolling | stable") end
+    if text::parse_int(p.base_release, 0) < 40 is out.push("base.release musi być numerem Fedory >= 40") end
+    if p.dm != "sddm" && p.dm != "hdm" is out.push("desktop.display_manager: sddm (dziś) | hdm (plan)") end
+    let mut f: int = 0
+    while f < p.formats.len() is
+        if p.formats[f] != "iso" && p.formats[f] != "oci" is out.push("targets.formats: nieznany format '" + p.formats[f] + "'") end
+        f += 1
+    end
+    let b: [string] = required_branding()
+    let mut i: int = 0
+    while i < b.len() is
+        let path: string = text::path_join(text::path_join(p.dir, "branding"), b[i])
+        if !fs::exists(path) is
+            out.push("branding/" + b[i] + " nie istnieje")
+        else is
+            let m: string = magic(path)
+            if text::ends_with(b[i], ".png") && !text::starts_with(m, "89 50 4e 47") is out.push("branding/" + b[i] + " nie jest PNG") end
+            if text::ends_with(b[i], ".jpg") && !text::starts_with(m, "ff d8 ff") is out.push("branding/" + b[i] + " nie jest JPEG") end
+        end
+        i += 1
+    end
+    let dirs: [string] = ["files", "package-list", "scripts"]
+    let mut d: int = 0
+    while d < dirs.len() is
+        if !fs::is_dir(text::path_join(p.dir, dirs[d])) is out.push("brak katalogu " + dirs[d] + "/") end
+        d += 1
+    end
+    if fs::is_dir(text::path_join(p.dir, "package-list")) is
+        let lists: [string] = package_lists(p)
+        if lists.len() == 0 is out.push("package-list/ nie zawiera żadnego pliku *.list") end
+    end
+    if p.org == "" is out.push("user.hk: [user] organization albo name") end
+    return out
+end
+
+;; Pliki *.list w kolejności alfabetycznej.
+pub fn package_lists(p: Project) -> [string] is
+    let dir: string = text::path_join(p.dir, "package-list")
+    let mut out: [string] = []
+    if !fs::is_dir(dir) is return out end
+    let files: [string] = fs::list_dir(dir)
+    let mut i: int = 0
+    while i < files.len() is
+        if text::ends_with(files[i], ".list") is out.push(files[i]) end
+        i += 1
+    end
+    return sort(out)
+end
+
+pub fn sort(xs: [string]) -> [string] is
+    let mut a: [string] = xs
+    let n: int = a.len()
+    let mut x: int = 1
+    while x < n is
+        let key: string = a[x]
+        let mut y: int = x - 1
+        while y >= 0 && a[y] > key is
+            a[y + 1] = a[y]
+            y -= 1
+        end
+        a[y + 1] = key
+        x += 1
+    end
+    return a
+end
+
+;; Pakiety ze wszystkich list: jedna nazwa na linię, `#` komentarz, puste linie pomijane.
+pub fn packages(p: Project) -> [string] is
+    let mut out: [string] = []
+    let lists: [string] = package_lists(p)
+    let mut i: int = 0
+    while i < lists.len() is
+        let ls: [string] = text::lines(fs::read(text::path_join(text::path_join(p.dir, "package-list"), lists[i])))
+        let mut k: int = 0
+        while k < ls.len() is
+            let mut t: string = text::trim(ls[k])
+            let h: int = text::find(t, "#")
+            if h >= 0 is t = text::trim(t[0..h]) end
+            k += 1
+            if t != "" is
+                let mut seen: bool = false
+                let mut j: int = 0
+                while j < out.len() is
+                    if out[j] == t is seen = true end
+                    j += 1
+                end
+                if !seen is out.push(t) end
+            end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Poprawna nazwa pakietu (to samo kryterium co w lpm) — chroni wywołanie dnf przed wstrzyknięciem.
+pub fn safe_pkg(s: string) -> bool is
+    let n: int = s.len()
+    if n == 0 || n > 120 || text::starts_with(s, "-") is return false end
+    let mut i: int = 0
+    while i < n is
+        let c: string = s[i..i + 1]
+        let ok: bool = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "." || c == "_" || c == "+" || c == "-" || c == "*" || c == ":" || c == "@"
+        if !ok is return false end
+        i += 1
+    end
+    return true
+end
+
+pub fn with_formats(p: Project, f: [string]) -> Project is
+    return Project { dir: p.dir, name: p.name, id: p.id, version: p.version, arch: p.arch, channel: p.channel,
+        base_release: p.base_release, dnf: p.dnf, zenitd_repo: p.zenitd_repo, zenitd_script: p.zenitd_script,
+        desktop: p.desktop, dm: p.dm, formats: f, oci_name: p.oci_name, org: p.org, registry: p.registry,
+        token: p.token, tools_catalog: p.tools_catalog, kernel_args: p.kernel_args }
+end
+
+pub fn empty_for_steps() -> Project is
+    return with_formats(empty_project("."), ["iso", "oci"])
+end
+
+pub fn lower(s: string) -> string is
+    let r: sys::Exec = sys::exec("printf %s " + sys::sq(s) + " | tr 'A-Z' 'a-z'")
+    return text::trim(r.out)
+end
