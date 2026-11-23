@@ -1,0 +1,111 @@
+mod blake3
+use "std -> crypto" from "crypto"
+use "std -> env" from "env"
+
+;; Hashe w tej bibliotece to 64-znakowe napisy hex (32 bajty, małe litery) —
+;; wystarczy zwykły `string`, osobny typ `Hash` nie jest potrzebny, a format na
+;; dysku (manifest, store) jest ten sam niezależnie od implementacji.
+
+;; Nazwa algorytmu użytego w tym procesie. Domyślnie BLAKE3 (czysty H#);
+;; ustaw FASTTREE_HASH=sha256, żeby wymusić odpowiednik `-d:fasttreeNoBlake3`
+;; (SHA-256 z runtime'u H#). Wartość trafia do manifestu jako `hashAlgo`.
+pub fn algo_name() -> string is
+    if env::get("FASTTREE_HASH") == "sha256" is return "sha256-fallback" end
+    return "blake3"
+end
+
+pub fn hex_digit(n: int) -> string is
+    let d: string = "0123456789abcdef"
+    return d[n..n + 1]
+end
+
+pub fn hex_of(b: [int]) -> string is
+    let mut s: string = ""
+    let n: int = b.len()
+    let mut i: int = 0
+    while i < n is
+        let hi: int = b[i] / 16
+        let lo: int = b[i] % 16
+        s = s + hex_digit(hi) + hex_digit(lo)
+        i += 1
+    end
+    return s
+end
+
+fn nibble(c: int) -> int is
+    if c >= 48 && c <= 57 is return c - 48 end
+    if c >= 97 && c <= 102 is return c - 87 end
+    if c >= 65 && c <= 70 is return c - 55 end
+    return -1
+end
+
+;; Czy `s` jest poprawnym hashem (64 znaki hex).
+pub fn is_valid_hash(s: string) -> bool is
+    let n: int = s.len()
+    if n != 64 is return false end
+    let mut i: int = 0
+    while i < 64 is
+        if nibble(char_code(s, i)) < 0 is return false end
+        i += 1
+    end
+    return true
+end
+
+pub fn char_code(s: string, i: int) -> int is
+    return __builtin_str_to_char_code(s[i..i + 1])
+end
+
+;; Dekoduje hex (parzysta długość) do bajtów; zwraca [] dla złego wejścia.
+pub fn hex_decode(s: string) -> [int] is
+    let mut out: [int] = []
+    let n: int = s.len()
+    if n % 2 != 0 is return out end
+    let mut i: int = 0
+    while i < n is
+        let h: int = nibble(char_code(s, i))
+        let l: int = nibble(char_code(s, i + 1))
+        if h < 0 || l < 0 is
+            return []
+        end
+        out.push(h * 16 + l)
+        i += 2
+    end
+    return out
+end
+
+;; Bajty napisu (UTF-8).
+pub fn string_bytes(s: string) -> [int] is
+    let mut out: [int] = []
+    let b: bytes = string_to_bytes(s)
+    let n: int = b.len()
+    let mut i: int = 0
+    while i < n is
+        out.push(b[i] & 255)
+        i += 1
+    end
+    return out
+end
+
+;; Skrót pojedynczego bloku danych (np. chunku pliku) -> hex.
+pub fn hash_bytes(data: [int]) -> string is
+    if algo_name() == "sha256-fallback" is
+        let b: bytes = data
+        return crypto::sha256_bytes(b)
+    end
+    return hex_of(blake3::hash(data))
+end
+
+;; Węzeł wewnętrzny drzewa Merkle: skrót konkatenacji SUROWYCH skrótów dzieci.
+pub fn hash_children(children: [string]) -> string is
+    let mut buf: [int] = []
+    for c in children is
+        let raw: [int] = hex_decode(c)
+        let rn: int = raw.len()
+        let mut i: int = 0
+        while i < rn is
+            buf.push(raw[i])
+            i += 1
+        end
+    end
+    return hash_bytes(buf)
+end
