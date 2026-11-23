@@ -1,0 +1,233 @@
+mod text
+mod sys
+mod store
+mod manifest
+mod composefs
+mod repo
+use "std -> fs" from "fs"
+use "std -> collections" from "col"
+
+;; Warstwowanie lokalnych zmian na istniejący tag ("derive") — odpowiednik
+;; layeringu pakietów z rpm-ostree, ale na poziomie samego drzewa plików:
+;;
+;;   nowy_tag = baza + zmiany
+;;
+;; `changes_dir` to katalog ze zmianami względem bazy. Może to być:
+;;   * zwykły katalog (np. wynik `dnf --installroot` / `rpm -i --root` na
+;;     pustym katalogu, albo rozpakowany tar z własnymi plikami),
+;;   * upperdir OverlayFS (usunięcia = urządzenie znakowe 0:0, opaque =
+;;     xattr trusted.overlay.opaque=y),
+;;   * warstwa w stylu OCI (usunięcia = `.wh.<nazwa>`, opaque = `.wh..wh..opq`).
+;; Wszystkie trzy konwencje są rozpoznawane jednocześnie.
+;;
+;; Kolejność (ważna dla bezpieczeństwa i semantyki):
+;;   1. rozwiąż konflikty typów (plik <-> katalog <-> symlink) — usuwa symlink
+;;      zanim cokolwiek zostanie zapisane "przez" niego,
+;;   2. opaque: wyczyść zawartość katalogów oznaczonych jako nieprzezroczyste,
+;;   3. whiteouty: usuń wskazane ścieżki,
+;;   4. nałóż pliki ze zmian (tar, bez właściciela),
+;;   5. zbuduj manifest nowego taga (chunki zdeduplikowane ze store).
+;; Baza i jej manifest nie są modyfikowane.
+
+pub struct DeriveResult is
+    pub ok:      bool
+    pub error:   string
+    pub root:    string
+    pub entries: int
+    pub changed: int
+    pub deleted: int
+end
+
+fn dfail(msg: string) -> DeriveResult is
+    return DeriveResult { ok: false, error: msg, root: "", entries: 0, changed: 0, deleted: 0 }
+end
+
+;; Usuwa wiodące "./".
+fn strip_dot(p: string) -> string is
+    if text::starts_with(p, "./") is
+        let n: int = p.len()
+        return p[2..n]
+    end
+    if p == "." is return "" end
+    return p
+end
+
+;; Katalog nadrzędny jako ścieżka względna ("" = korzeń).
+fn parent_of(p: string) -> string is
+    let d: string = text::dirname(p)
+    if d == "." is return "" end
+    return d
+end
+
+pub struct Markers is
+    pub whiteouts: [string]
+    pub opaque:    [string]
+end
+
+;; Zbiera markery usunięć ze `changes_dir`. Ścieżki względne, bez "./".
+pub fn scan_markers(changes_dir: string) -> Markers is
+    let mut script: string = "cd " + sys::sq(changes_dir) + " && "
+    script = script + "find . -mindepth 1 -type c | while IFS= read -r f; do "
+    script = script + "if [ \"$(stat -c '%t:%T' \"$f\")\" = \"0:0\" ]; then printf 'W\\t%s\\n' \"$f\"; fi; done; "
+    script = script + "find . -mindepth 1 -name '.wh.*' | while IFS= read -r f; do printf 'H\\t%s\\n' \"$f\"; done"
+    if sys::have_tool("getfattr") is
+        script = script + "; find . -type d | while IFS= read -r d; do "
+        script = script + "v=$(getfattr -n trusted.overlay.opaque --only-values \"$d\" 2>/dev/null); "
+        script = script + "if [ \"$v\" = y ]; then printf 'D\\t%s\\n' \"$d\"; fi; done"
+    end
+    let r: sys::Exec = sys::exec(script)
+    let lines: [string] = text::lines(r.out)
+    let n: int = lines.len()
+    let mut wh: [string] = []
+    let mut op: [string] = []
+    let mut i: int = 0
+    while i < n is
+        let line: string = lines[i]
+        i += 1
+        let f: [string] = text::split_once(line, "\t")
+        let fc: int = f.len()
+        if fc == 2 is
+            let kind: string = f[0]
+            let p: string = strip_dot(f[1])
+            if kind == "W" is
+                wh.push(p)
+            else if kind == "D" is
+                op.push(p)
+            else if kind == "H" is
+                let base: string = text::basename(p)
+                let par: string = parent_of(p)
+                if base == ".wh..wh..opq" is
+                    op.push(par)
+                else is
+                    let bl: int = base.len()
+                    wh.push(text::path_join(par, base[4..bl]))
+                end
+            end
+        end
+    end
+    return Markers { whiteouts: wh, opaque: op }
+end
+
+fn is_marker_name(path: string) -> bool is
+    return text::starts_with(text::basename(path), ".wh.")
+end
+
+;; Tworzy nowy tag `new_tag` = `base_tag` + zawartość `changes_dir`.
+;; `root` to katalog repo FastTree (manifests/, store/).
+pub fn derive(root: string, base_tag: string, changes_dir: string, new_tag: string) -> DeriveResult is
+    if !repo::valid_tag(base_tag) is return dfail("niepoprawna nazwa taga bazowego: '" + base_tag + "'") end
+    if !repo::valid_tag(new_tag) is return dfail("niepoprawna nazwa nowego taga: '" + new_tag + "'") end
+    if base_tag == new_tag is return dfail("nowy tag musi różnić się od bazowego ('" + base_tag + "')") end
+    if !fs::is_dir(changes_dir) is return dfail("'" + changes_dir + "' nie jest katalogiem") end
+    let new_path: string = manifest::manifest_path_in(root, new_tag)
+    if fs::exists(new_path) is return dfail("tag '" + new_tag + "' już istnieje — wybierz inną nazwę lub usuń go przez 'rm'") end
+
+    let so: store::OpenResult = store::open(text::path_join(root, "store"))
+    if !so.ok is return dfail(so.error) end
+    let bm: manifest::ParseResult = manifest::load(manifest::manifest_path_in(root, base_tag))
+    if !bm.ok is return dfail(bm.error) end
+
+    let ct: sys::TreeResult = sys::list_tree(changes_dir)
+    if !ct.ok is return dfail(ct.error) end
+
+    let work: string = text::path_join(text::path_join(sys::tmp_dir(), "fasttree-derive"), new_tag + "-" + text::istr(sys::pid()))
+    sys::rm_rf(work)
+    let tree: string = text::path_join(work, "tree")
+    let mr: composefs::CfsResult = composefs::materialize_tree(bm.manifest, so.store, tree)
+    if !mr.ok is
+        sys::rm_rf(work)
+        return dfail("materializacja bazy '" + base_tag + "': " + mr.error)
+    end
+
+    ;; mapa: ścieżka -> tryb we wpisie bazowym
+    let mut base_mode = col::hashmap_new()
+    let bn: int = bm.manifest.entries.len()
+    let mut b: int = 0
+    while b < bn is
+        let be: manifest::FileEntry = bm.manifest.entries[b]
+        base_mode = col::hashmap_insert(base_mode, be.path, be.mode)
+        b += 1
+    end
+
+    ;; 1. konflikty typów — przed jakimkolwiek zapisem lub usunięciem
+    let cn: int = ct.entries.len()
+    let mut changed: int = 0
+    let mut c: int = 0
+    while c < cn is
+        let ce: sys::TreeEntry = ct.entries[c]
+        c += 1
+        let p: string = ce.path
+        if !is_marker_name(p) is
+            changed += 1
+            if col::hashmap_contains(base_mode, p) is
+                let bmode: string = col::hashmap_get(base_mode, p)
+                let ck: string = ce.kind
+                let full: string = text::path_join(tree, p)
+                if ck == "d" is
+                    if bmode != "directory" is sys::rm_f(full) end
+                else is
+                    sys::rm_rf(full)
+                end
+            end
+        end
+    end
+
+    ;; 2 + 3. opaque i whiteouty
+    let mk: Markers = scan_markers(changes_dir)
+    let on: int = mk.opaque.len()
+    let mut o: int = 0
+    while o < on is
+        let dir: string = text::path_join(tree, mk.opaque[o])
+        o += 1
+        if fs::is_dir(dir) is
+            let r: sys::Exec = sys::exec("find " + sys::sq(dir) + " -mindepth 1 -maxdepth 1 -exec rm -rf -- " + text::lbrace() + text::rbrace() + " +")
+            if r.code != 0 is
+                sys::rm_rf(work)
+                return dfail("czyszczenie katalogu opaque nie powiodło się: " + r.out)
+            end
+        end
+    end
+    let wn: int = mk.whiteouts.len()
+    let mut w: int = 0
+    while w < wn is
+        let rel: string = mk.whiteouts[w]
+        w += 1
+        if rel != "" is sys::rm_rf(text::path_join(tree, rel)) end
+    end
+
+    ;; 4. nałożenie zmian (bez markerów i urządzeń specjalnych)
+    if cn > 0 is
+        let list0: string = text::path_join(work, "changes.list")
+        let tarf: string = text::path_join(work, "changes.tar")
+        let mut s1: string = "cd " + sys::sq(changes_dir) + " && find . -mindepth 1 \\( -type f -o -type l -o -type d \\) ! -name '.wh.*' -print0 > " + sys::sq(list0)
+        let r1: sys::Exec = sys::exec(s1)
+        if r1.code != 0 is
+            sys::rm_rf(work)
+            return dfail("lista zmian: " + r1.out)
+        end
+        let r2: sys::Exec = sys::exec("tar -cf " + sys::sq(tarf) + " --null --no-recursion -C " + sys::sq(changes_dir) + " -T " + sys::sq(list0))
+        if r2.code != 0 is
+            sys::rm_rf(work)
+            return dfail("pakowanie zmian: " + r2.out)
+        end
+        let r3: sys::Exec = sys::exec("tar -xf " + sys::sq(tarf) + " --no-same-owner -C " + sys::sq(tree))
+        if r3.code != 0 is
+            sys::rm_rf(work)
+            return dfail("nakładanie zmian: " + r3.out)
+        end
+    end
+
+    ;; 5. manifest nowego taga
+    let br: manifest::BuildResult = manifest::build_default(tree, so.store)
+    if !br.ok is
+        sys::rm_rf(work)
+        return dfail(br.error)
+    end
+    if !fs::write(new_path, manifest::to_json(br.manifest)) is
+        sys::rm_rf(work)
+        return dfail("nie można zapisać " + new_path)
+    end
+    sys::rm_rf(work)
+    let total: int = br.manifest.entries.len()
+    return DeriveResult { ok: true, error: "", root: br.manifest.root, entries: total, changed: changed, deleted: wn }
+end
