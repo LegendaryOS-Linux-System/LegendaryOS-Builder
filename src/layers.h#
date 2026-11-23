@@ -1,0 +1,159 @@
+mod text
+mod sys
+use "std -> fs" from "fs"
+use "std -> collections" from "col"
+
+;; Rozpakowywanie i scalanie warstw OCI (semantyka whiteoutów wg OCI image
+;; spec) Narzędzia zewnętrzne: GNU tar, cp.
+
+pub struct LayerResult is
+    pub ok:    bool
+    pub error: string
+end
+
+fn lok() -> LayerResult is return LayerResult { ok: true, error: "" } end
+fn lerr(m: string) -> LayerResult is return LayerResult { ok: false, error: m } end
+
+;; GNU tar sam wykrywa gzip/zstd po zawartości, więc jedno wywołanie obsługuje
+;; .tar i .tar.gz. `--xattrs` odtwarza m.in. `security.capability`.
+pub fn extract_layer_tar(layer_tar: string, dest: string) -> LayerResult is
+    fs::mkdir(dest)
+    let r: sys::Exec = sys::exec("tar --xattrs --xattrs-include='*' -xf " + sys::sq(layer_tar) + " -C " + sys::sq(dest))
+    if r.code != 0 is
+        return lerr("rozpakowanie warstwy '" + layer_tar + "' nie powiodło się: " + r.out)
+    end
+    return lok()
+end
+
+pub fn opaque_name() -> string is return ".wh..wh..opq" end
+
+pub fn is_opaque(name: string) -> bool is return name == opaque_name() end
+
+pub fn is_whiteout(name: string) -> bool is
+    return text::starts_with(name, ".wh.") && !is_opaque(name)
+end
+
+pub fn whiteout_target(name: string) -> string is
+    let n: int = name.len()
+    return name[4..n]
+end
+
+;; Ścieżka docelowa dla katalogu względnego `rel_dir` ("." = korzeń).
+fn dest_dir_of(dest: string, rel_dir: string) -> string is
+    if rel_dir == "." is return dest end
+    return text::path_join(dest, rel_dir)
+end
+
+fn rel_dir_of(rel: string) -> string is
+    let i: int = text::rfind(rel, "/")
+    if i < 0 is return "." end
+    return rel[0..i]
+end
+
+;; Nakłada JEDNĄ rozpakowaną warstwę na `dest` (kolejność: od najstarszej).
+pub fn merge_layer_into(layer_dir: string, dest: string) -> LayerResult is
+    let tr: sys::TreeResult = sys::list_tree(layer_dir)
+    if !tr.ok is return lerr(tr.error) end
+    let n: int = tr.entries.len()
+
+    ;; Krok 1: opaque whiteouts — czyść odziedziczoną zawartość katalogu.
+    let mut i: int = 0
+    while i < n is
+        let e: sys::TreeEntry = tr.entries[i]
+        let ek: string = e.kind
+        let ep: string = e.path
+        i += 1
+        if ek == "f" && text::basename(ep) == opaque_name() is
+            let target: string = dest_dir_of(dest, rel_dir_of(ep))
+            if fs::is_dir(target) is sys::rm_rf(target) end
+            fs::mkdir(target)
+        end
+    end
+
+    ;; Krok 2: kopiuj wpisy warstwy (bez znaczników whiteout). `seen` — mapa
+    ;; inode -> pierwsza ścieżka docelowa, per warstwa (hardlinki).
+    let mut seen = col::hashmap_new()
+    let mut k: int = 0
+    while k < n is
+        let e2: sys::TreeEntry = tr.entries[k]
+        k += 1
+        let rel: string = e2.path
+        let name: string = text::basename(rel)
+        if is_whiteout(name) || is_opaque(name) is continue end
+        let src: string = text::path_join(layer_dir, rel)
+        let dst: string = text::path_join(dest, rel)
+        let kind: string = e2.kind
+        if kind == "d" is
+            fs::mkdir(dst)
+        else if kind == "l" is
+            if sys::exists_any(dst) is sys::rm_f(dst) end
+            let tgt: string = sys::readlink(src)
+            if !sys::symlink(tgt, dst) is
+                return lerr("tworzenie symlinku '" + dst + "' nie powiodło się")
+            end
+        else is
+            fs::mkdir(text::dirname(dst))
+            if sys::exists_any(dst) is sys::rm_f(dst) end
+            let nl: int = e2.nlink
+            let ino: string = e2.inode
+            let mut linked: bool = false
+            if nl > 1 is
+                if col::hashmap_contains(seen, ino) is
+                    let first: string = col::hashmap_get(seen, ino)
+                    let lr: sys::Exec = sys::exec("ln -- " + sys::sq(first) + " " + sys::sq(dst))
+                    if lr.code != 0 is
+                        return lerr("hardlink '" + first + "' -> '" + dst + "' nie powiódł się: " + lr.out)
+                    end
+                    linked = true
+                else is
+                    seen = col::hashmap_insert(seen, ino, dst)
+                end
+            end
+            if !linked is
+                ;; cp zachowuje właściciela i xattr (setcap), czego sama kopia
+                ;; bajtów nie zrobi.
+                let cr: sys::Exec = sys::exec("cp --preserve=mode,ownership,timestamps,xattr " + sys::sq(src) + " " + sys::sq(dst))
+                if cr.code != 0 is
+                    return lerr("kopiowanie '" + src + "' -> '" + dst + "' nie powiodło się: " + cr.out)
+                end
+            end
+        end
+    end
+
+    ;; Krok 3: whiteouty pojedynczych plików — PO skopiowaniu własnej treści.
+    let mut m: int = 0
+    while m < n is
+        let e3: sys::TreeEntry = tr.entries[m]
+        m += 1
+        let k3: string = e3.kind
+        let p3: string = e3.path
+        let name3: string = text::basename(p3)
+        if k3 == "f" && is_whiteout(name3) is
+            let dir: string = dest_dir_of(dest, rel_dir_of(p3))
+            let victim: string = text::path_join(dir, whiteout_target(name3))
+            if fs::is_dir(victim) && !sys::is_symlink(victim) is
+                sys::rm_rf(victim)
+            else if sys::exists_any(victim) is
+                sys::rm_f(victim)
+            end
+        end
+    end
+    return lok()
+end
+
+;; Rozpakowuje i scala warstwy (dół -> góra) do `dest`.
+pub fn materialize_layers(layer_tars: [string], work_dir: string, dest: string) -> LayerResult is
+    fs::mkdir(dest)
+    let n: int = layer_tars.len()
+    let mut i: int = 0
+    while i < n is
+        let tar: string = layer_tars[i]
+        let ld: string = text::path_join(work_dir, "layer-" + text::istr(i))
+        let r: LayerResult = extract_layer_tar(tar, ld)
+        if !r.ok is return r end
+        let m: LayerResult = merge_layer_into(ld, dest)
+        if !m.ok is return m end
+        i += 1
+    end
+    return lok()
+end
