@@ -1,0 +1,38 @@
+mod text
+mod sys
+
+;; Warstwa interfejsu lpm: kolory (colors), paski postępu (progress-bar) i
+;; czytelne błędy (nidus). Zmiana wyglądu = zmiana tylko tego pliku.
+
+pub fn info(msg: string) is write(colors::cyan("  ›") + " " + msg) end
+pub fn ok(msg: string) is write(colors::green("  ✓") + " " + msg) end
+pub fn warn(msg: string) is write(colors::yellow("  !") + " " + msg) end
+pub fn step(n: int, total: int, msg: string) is
+    write(colors::bold(colors::blue("[" + text::istr(n) + "/" + text::istr(total) + "]")) + " " + msg)
+end
+pub fn head(msg: string) is write(colors::bold(colors::magenta("lpm")) + " " + colors::bold(msg)) end
+
+pub fn err(msg: string) is
+    sys::eprint(colors::red(colors::bold("  ✗ błąd:")) + " " + msg)
+end
+
+;; Błąd z fragmentem pliku konfiguracyjnego (nidus).
+pub fn config_error(path: string, src: string, needle: string, message: string, help: string) is
+    let at: int = text::find(src, needle)
+    let mut d: nidus::diagnostic::Diagnostic = nidus::error(message)
+    d = d.with_code("lpm::config")
+    d = d.with_source(path, src)
+    if needle != "" && at >= 0 is d = d.with_label(nidus::primary_label(at, needle.len(), "tutaj")) end
+    if help != "" is d = d.with_help(help) end
+    nidus::report(d)
+end
+
+pub fn bar(total: int, label: string) -> bar::ProgressBar is
+    return pb::quick_bar(total, label)
+end
+
+pub fn kv(k: string, v: string) is
+    let mut pad: string = k
+    while pad.len() < 14 is pad = pad + " " end
+    write("  " + colors::dim(pad) + v)
+end
