@@ -1,0 +1,13 @@
+sddm
+qt6-qtwayland
+mesa-dri-drivers
+mesa-vulkan-drivers
+mesa-libEGL
+mesa-libgbm
+libglvnd
+xorg-x11-server-Xwayland
+pipewire
+wireplumber
+xdg-desktop-portal
+fontconfig
+google-noto-sans-fonts
