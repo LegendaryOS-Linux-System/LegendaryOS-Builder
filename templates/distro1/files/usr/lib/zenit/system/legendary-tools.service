@@ -1,0 +1,12 @@
+[Unit]
+Description=LegendaryOS: montowanie narzędzi /tools (squashfs, tylko do odczytu)
+After=legendary-state.service local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/lpm tools mount-all
+
+[Install]
+WantedBy=multi-user.target
