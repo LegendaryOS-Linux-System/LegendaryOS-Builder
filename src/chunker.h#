@@ -1,0 +1,89 @@
+pub struct ChunkerConfig is
+    pub min_size: int
+    pub avg_size: int
+    pub max_size: int
+end
+
+;; Zakres [offset, offset+len) w buforze wejściowym.
+pub struct Range is
+    pub offset: int
+    pub size:   int
+end
+
+pub fn default_config() -> ChunkerConfig is
+    return ChunkerConfig { min_size: 4096, avg_size: 16384, max_size: 65536 }
+end
+
+;; Tablica gear: 256 stałych 64-bitowych z deterministycznego xorshift64
+;; (seed 0x2545F4914F6CDD1D) — format chunków jest częścią formatu na dysku. H# nie ma
+;; logicznego `>>` dla u64, więc `seed >> 7` emulujemy: arytmetyczne
+;; przesunięcie + maska 2^57-1 zerująca bity znaku.
+fn gear_table() -> [u64] is
+    let mut t: [u64] = []
+    let mut seed: u64 = 2685821657736338717
+    let m7: u64 = 144115188075855871
+    ;; granica w zmiennej: `while i < 256` z literałem > 255 jest w H# 0.9
+    ;; obcinane do 8 bitów (pętla nie wykonuje się wcale).
+    let limit: int = 256
+    let mut i: int = 0
+    while i < limit is
+        let a: u64 = seed << 13
+        seed = seed ^ a
+        let b: u64 = seed >> 7
+        let b2: u64 = b & m7
+        seed = seed ^ b2
+        let c: u64 = seed << 17
+        seed = seed ^ c
+        t.push(seed)
+        i += 1
+    end
+    return t
+end
+
+;; Dzieli bufor na chunki wg FastCDC. `hash` NIGDY nie jest resetowany przy
+;; cięciu wymuszonym przez max_size ani między chunkami "z zapomnieniem" —
+;; reset hasha czyniłby granice zależnymi od pozycji, czego FastCDC ma
+;; unikać. Reset następuje tylko po cięciu wynikającym z maski.
+pub fn chunk_ranges(data: [int], cfg: ChunkerConfig) -> [Range] is
+    let mut out: [Range] = []
+    let n: int = data.len()
+    if n == 0 is return out end
+    let gear: [u64] = gear_table()
+    let mask_hard: u64 = 32767
+    let mask_easy: u64 = 8191
+    let zero: u64 = 0
+    ;; pola `cfg` kopiujemy do zmiennych lokalnych — odczyt pola struktury
+    ;; wprost w warunku potrafi w H# 0.9 trafić w złe pole.
+    let min_sz: int = cfg.min_size
+    let avg_sz: int = cfg.avg_size
+    let max_sz: int = cfg.max_size
+    let mut start: int = 0
+    let mut i: int = 0
+    let mut h: u64 = 0
+    while i < n is
+        let pos: int = i - start
+        if pos >= max_sz is
+            out.push(Range { offset: start, size: i - start })
+            start = i
+            continue
+        end
+        let sh: u64 = h << 1
+        let g: u64 = gear[data[i] & 255]
+        h = sh + g
+        i += 1
+        if pos + 1 >= min_sz is
+            let mut thr: u64 = mask_easy
+            if pos + 1 < avg_sz is thr = mask_hard end
+            let masked: u64 = h & thr
+            if masked == zero is
+                out.push(Range { offset: start, size: i - start })
+                start = i
+                h = 0
+            end
+        end
+    end
+    if start < n is
+        out.push(Range { offset: start, size: n - start })
+    end
+    return out
+end
