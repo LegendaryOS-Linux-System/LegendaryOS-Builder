@@ -1,0 +1,566 @@
+mod text
+mod sys
+mod hashing
+mod layout
+mod lmanifest
+use "std -> fs" from "fs"
+
+;; ── /packages: magazyn pakietów w stylu nix, bliżej systemu ─────────────────
+;;
+;;   /packages/store/<h32>-<nazwa>-<wersja>/
+;;       content/   pliki pakietu w układzie /system (bin, lib64, share, ...)
+;;       wrap/      skrypty uruchamiające z biblioteką ścieżek closure
+;;       meta.toml  nazwa, wersja, nevra, deps (nazwy ścieżek store), źródło
+;;   /packages/profiles/<N>/     generacja = farma symlinków (bin, share, ...)
+;;   /packages/profiles/current  symlink do aktualnej generacji (zmiana atomowa)
+;;   /packages/roots/<nazwa>     dodatkowe korzenie GC (np. przypięte pakiety)
+;;
+;; Dlaczego nie ma konfliktów zależności: ścieżka w store zawiera hash wejść
+;; (nazwa, wersja, arch, hashe zależności, skrót źródła), więc dwie wersje tej
+;; samej biblioteki leżą obok siebie, a każdy pakiet widzi tylko własny closure
+;; (LD_LIBRARY_PATH w wrapperze). Konflikt może wystąpić wyłącznie na poziomie
+;; profilu (dwa pakiety dostarczają ten sam plik w bin/) — jest wtedy
+;; raportowany z nazwami pakietów, nie psuje niczyjej biblioteki.
+;;
+;; Sterowniki (NVIDIA, Mesa): biblioteki z lmanifest::default_host_provided()
+;; NIGDY nie trafiają do closure — pochodzą z /system (+ /run/opengl-driver).
+
+pub struct PkgSpec is
+    pub name:       string
+    pub version:    string
+    pub arch:       string
+    pub nevra:      string
+    pub source:     string   ;; np. "fedora:43:updates" albo URL
+    pub src_digest: string   ;; skrót źródła (np. sha256 RPM)
+    pub deps:       [string] ;; nazwy ścieżek store zależności (muszą już istnieć)
+end
+
+pub struct PkgResult is
+    pub ok:         bool
+    pub error:      string
+    pub store_name: string
+    pub path:       string
+    pub existed:    bool
+end
+
+fn pk_fail(msg: string) -> PkgResult is
+    return PkgResult { ok: false, error: msg, store_name: "", path: "", existed: false }
+end
+
+;; Poprawny element nazwy: bez '/', spacji i "..", niepusty.
+pub fn valid_component(s: string) -> bool is
+    let n: int = s.len()
+    if n == 0 || n > 120 is return false end
+    if text::contains(s, "/") || text::contains(s, "..") || text::contains(s, " ") is return false end
+    if text::starts_with(s, ".") is return false end
+    let mut i: int = 0
+    while i < n is
+        let c: int = __builtin_str_to_char_code(s[i..i + 1])
+        if c < 33 || c == 127 is return false end
+        i += 1
+    end
+    return true
+end
+
+fn sort_copy(xs: [string]) -> [string] is
+    let mut a: [string] = []
+    let mut i: int = 0
+    while i < xs.len() is
+        a.push(xs[i])
+        i += 1
+    end
+    let n: int = a.len()
+    let mut x: int = 1
+    while x < n is
+        let key: string = a[x]
+        let mut y: int = x - 1
+        while y >= 0 && a[y] > key is
+            a[y + 1] = a[y]
+            y -= 1
+        end
+        a[y + 1] = key
+        x += 1
+    end
+    return a
+end
+
+;; Hash wejść (32 znaki hex). Deterministyczny: kolejność deps nie ma znaczenia.
+pub fn input_hash(spec: PkgSpec) -> string is
+    let deps: [string] = sort_copy(spec.deps)
+    let material: string = "lpkg1\n" + spec.name + "\n" + spec.version + "\n" + spec.arch + "\n" + spec.src_digest + "\n" + text::join(deps, "\n")
+    let h: string = hashing::hash_bytes(hashing::string_bytes(material))
+    return h[0..32]
+end
+
+pub fn store_name(spec: PkgSpec) -> string is
+    return input_hash(spec) + "-" + spec.name + "-" + spec.version
+end
+
+pub fn store_path(l: layout::Layout, sname: string) -> string is
+    return text::path_join(layout::pkg_store(l), sname)
+end
+
+pub fn content_path(l: layout::Layout, sname: string) -> string is
+    return text::path_join(store_path(l, sname), "content")
+end
+
+pub fn is_installed(l: layout::Layout, sname: string) -> bool is
+    return fs::is_dir(store_path(l, sname)) && fs::exists(text::path_join(store_path(l, sname), "meta.toml"))
+end
+
+pub fn list_store(l: layout::Layout) -> [string] is
+    let dir: string = layout::pkg_store(l)
+    let mut out: [string] = []
+    if !fs::is_dir(dir) is return out end
+    let files: [string] = fs::list_dir(dir)
+    let mut i: int = 0
+    while i < files.len() is
+        if is_installed(l, files[i]) is out.push(files[i]) end
+        i += 1
+    end
+    return sort_copy(out)
+end
+
+pub fn meta(l: layout::Layout, sname: string) -> lmanifest::ParseResult is
+    return lmanifest::load(text::path_join(store_path(l, sname), "meta.toml"))
+end
+
+;; Domknięcie przechodnie: korzenie + wszystkie zależności (posortowane, bez duplikatów).
+;; Brak meta.toml zależności = błąd, zwracany jako pierwszy element "!<komunikat>".
+pub fn closure(l: layout::Layout, roots: [string]) -> [string] is
+    let mut seen: [string] = []
+    let mut todo: [string] = []
+    let mut i: int = 0
+    while i < roots.len() is
+        todo.push(roots[i])
+        i += 1
+    end
+    while todo.len() > 0 is
+        let cur: string = todo[todo.len() - 1]
+        let mut rest: [string] = []
+        let mut k: int = 0
+        while k < todo.len() - 1 is
+            rest.push(todo[k])
+            k += 1
+        end
+        todo = rest
+        let mut have: bool = false
+        let mut s: int = 0
+        while s < seen.len() is
+            if seen[s] == cur is have = true end
+            s += 1
+        end
+        if !have is
+            let m: lmanifest::ParseResult = meta(l, cur)
+            if !m.ok is return ["!brak pakietu w store: " + cur] end
+            seen.push(cur)
+            let deps: [string] = lmanifest::get_list(m.doc, "package", "deps")
+            let mut d: int = 0
+            while d < deps.len() is
+                todo.push(deps[d])
+                d += 1
+            end
+        end
+    end
+    return sort_copy(seen)
+end
+
+;; Katalogi z bibliotekami (content/lib64, content/lib) wszystkich pakietów closure.
+pub fn lib_dirs(l: layout::Layout, clos: [string]) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < clos.len() is
+        let base: string = content_path(l, clos[i])
+        let a: string = text::path_join(base, "lib64")
+        let b: string = text::path_join(base, "lib")
+        if fs::is_dir(a) is out.push(a) end
+        if fs::is_dir(b) is out.push(b) end
+        i += 1
+    end
+    return out
+end
+
+;; Wrapper: ustawia LD_LIBRARY_PATH z closure i uruchamia prawdziwy plik.
+;; Host (sterowniki GL/Vulkan/CUDA) jest dopisany NA KOŃCU, więc zawsze
+;; wygrywa wersja z /system tam, gdzie pakiet nie niesie własnej.
+pub fn wrapper_script(real: string, libs: [string], host_dirs: [string]) -> string is
+    let all: [string] = []
+    let mut parts: [string] = []
+    let mut i: int = 0
+    while i < libs.len() is
+        parts.push(libs[i])
+        i += 1
+    end
+    let mut j: int = 0
+    while j < host_dirs.len() is
+        parts.push(host_dirs[j])
+        j += 1
+    end
+    let q: string = __builtin_char_code_to_str(34)
+    return "#!/bin/sh\n# wygenerowane przez lpm/libfasttree — nie edytuj\nLD_LIBRARY_PATH=" + q + text::join(parts, ":") + ":$LD_LIBRARY_PATH" + q + "\nexport LD_LIBRARY_PATH\nexec " + q + real + q + " " + q + "$@" + q + "\n"
+end
+
+pub fn host_driver_dirs() -> [string] is
+    return ["/run/opengl-driver/lib", "/run/opengl-driver/lib64"]
+end
+
+;; Kopiuje drzewo `content_dir` do store jako nowy pakiet — ATOMOWO:
+;; budowa w /packages/.tmp, potem rename() do store. Istniejący pakiet (ten
+;; sam hash) jest pomijany (deduplikacja).
+pub fn install_dir(l: layout::Layout, spec: PkgSpec, content_dir: string) -> PkgResult is
+    if !valid_component(spec.name) || !valid_component(spec.version) is
+        return pk_fail("niepoprawna nazwa/wersja pakietu: '" + spec.name + "' '" + spec.version + "'")
+    end
+    if !fs::is_dir(content_dir) is return pk_fail("brak katalogu zawartości " + content_dir) end
+    let mut i: int = 0
+    while i < spec.deps.len() is
+        if !is_installed(l, spec.deps[i]) is
+            return pk_fail("zależność nie jest w store: " + spec.deps[i])
+        end
+        i += 1
+    end
+    let sname: string = store_name(spec)
+    let final: string = store_path(l, sname)
+    if is_installed(l, sname) is
+        return PkgResult { ok: true, error: "", store_name: sname, path: final, existed: true }
+    end
+    let tmp: string = text::path_join(layout::pkg_tmp(l), sname + ".tmp." + text::istr(sys::pid()))
+    sys::rm_rf(tmp)
+    fs::mkdir(layout::pkg_tmp(l))
+    fs::mkdir(tmp)
+    let cp: sys::Exec = sys::exec("cp -a -- " + sys::sq(content_dir) + " " + sys::sq(text::path_join(tmp, "content")))
+    if cp.code != 0 is
+        sys::rm_rf(tmp)
+        return pk_fail("kopiowanie zawartości nie powiodło się: " + text::trim(cp.out))
+    end
+    ;; meta.toml
+    let mut d: lmanifest::Doc = lmanifest::empty()
+    d = lmanifest::put_str(d, "package", "name", spec.name)
+    d = lmanifest::put_str(d, "package", "version", spec.version)
+    d = lmanifest::put_str(d, "package", "arch", spec.arch)
+    d = lmanifest::put_str(d, "package", "nevra", spec.nevra)
+    d = lmanifest::put_str(d, "package", "source", spec.source)
+    d = lmanifest::put_str(d, "package", "src_digest", spec.src_digest)
+    d = lmanifest::put_list(d, "package", "deps", sort_copy(spec.deps))
+    let me: string = lmanifest::save(text::path_join(tmp, "meta.toml"), d)
+    if me != "" is
+        sys::rm_rf(tmp)
+        return pk_fail(me)
+    end
+    ;; wrappery dla plików wykonywalnych w content/bin
+    let wrapdir: string = text::path_join(tmp, "wrap")
+    fs::mkdir(wrapdir)
+    let bindir: string = text::path_join(text::path_join(tmp, "content"), "bin")
+    if fs::is_dir(bindir) is
+        let mut all: [string] = [sname]
+        let mut k: int = 0
+        while k < spec.deps.len() is
+            all.push(spec.deps[k])
+            k += 1
+        end
+        let clos: [string] = closure(l, spec.deps)
+        let mut libs: [string] = []
+        let mut c: int = 0
+        ;; własne lib pakietu (jeszcze w tmp, ale docelowo w final)
+        let own64: string = text::path_join(text::path_join(final, "content"), "lib64")
+        let own: string = text::path_join(text::path_join(final, "content"), "lib")
+        if fs::is_dir(text::path_join(text::path_join(tmp, "content"), "lib64")) is libs.push(own64) end
+        if fs::is_dir(text::path_join(text::path_join(tmp, "content"), "lib")) is libs.push(own) end
+        if clos.len() > 0 && text::starts_with(clos[0], "!") is
+            sys::rm_rf(tmp)
+            return pk_fail(clos[0])
+        end
+        let dl: [string] = lib_dirs(l, clos)
+        let mut z: int = 0
+        while z < dl.len() is
+            libs.push(dl[z])
+            z += 1
+        end
+        let exes: [string] = fs::list_dir(bindir)
+        let mut e: int = 0
+        while e < exes.len() is
+            let exe: string = exes[e]
+            e += 1
+            if valid_component(exe) is
+                let real: string = text::path_join(text::path_join(text::path_join(final, "content"), "bin"), exe)
+                let w: bool = fs::write(text::path_join(wrapdir, exe), wrapper_script(real, libs, host_driver_dirs()))
+                let chm: bool = sys::ok("chmod 0755 " + sys::sq(text::path_join(wrapdir, exe)))
+            end
+        end
+    end
+    fs::rename(tmp, final)
+    if !is_installed(l, sname) is
+        sys::rm_rf(tmp)
+        return pk_fail("atomowe przeniesienie do store nie powiodło się: " + final)
+    end
+    return PkgResult { ok: true, error: "", store_name: sname, path: final, existed: false }
+end
+
+;; ── Profile (generacje) ─────────────────────────────────────────────────────
+
+pub struct ProfileResult is
+    pub ok:         bool
+    pub error:      string
+    pub generation: int
+    pub conflicts:  [string]
+end
+
+fn pr_fail(msg: string) -> ProfileResult is
+    return ProfileResult { ok: false, error: msg, generation: 0, conflicts: [] }
+end
+
+pub fn profile_dir(l: layout::Layout, gen: int) -> string is
+    return text::path_join(layout::pkg_profiles(l), text::istr(gen))
+end
+
+pub fn current_link(l: layout::Layout) -> string is
+    return text::path_join(layout::pkg_profiles(l), "current")
+end
+
+pub fn current_generation(l: layout::Layout) -> int is
+    let t: string = sys::readlink(current_link(l))
+    if t == "" is return 0 end
+    return text::parse_int(text::basename(t), 0)
+end
+
+pub fn list_generations(l: layout::Layout) -> [int] is
+    let mut out: [int] = []
+    let dir: string = layout::pkg_profiles(l)
+    if !fs::is_dir(dir) is return out end
+    let files: [string] = fs::list_dir(dir)
+    let mut i: int = 0
+    while i < files.len() is
+        let n: int = text::parse_int(files[i], -1)
+        if n > 0 && fs::is_dir(profile_dir(l, n)) is out.push(n) end
+        i += 1
+    end
+    let mut x: int = 1
+    while x < out.len() is
+        let key: int = out[x]
+        let mut y: int = x - 1
+        while y >= 0 && out[y] > key is
+            out[y + 1] = out[y]
+            y -= 1
+        end
+        out[y + 1] = key
+        x += 1
+    end
+    return out
+end
+
+;; Atomowa zmiana symlinku: ln -sfn + mv -T (rename(2) pod spodem).
+pub fn switch_link(link: string, target: string) -> bool is
+    let tmp: string = link + ".new." + text::istr(sys::pid())
+    if !sys::ok("ln -sfn -- " + sys::sq(target) + " " + sys::sq(tmp)) is return false end
+    if !sys::ok("mv -T -- " + sys::sq(tmp) + " " + sys::sq(link)) is
+        sys::rm_f(tmp)
+        return false
+    end
+    return true
+end
+
+;; Katalogi najwyższego poziomu zawartości, które trafiają do profilu.
+fn profile_subdirs() -> [string] is
+    return ["bin", "sbin", "share", "lib", "lib64", "libexec", "include"]
+end
+
+;; Zwraca ścieżkę, na którą ma wskazywać wpis w profilu: wrapper (jeśli jest) albo plik.
+fn link_target(l: layout::Layout, sname: string, sub: string, file: string) -> string is
+    if sub == "bin" is
+        let w: string = text::path_join(text::path_join(store_path(l, sname), "wrap"), file)
+        if fs::exists(w) is return w end
+    end
+    return text::path_join(text::path_join(content_path(l, sname), sub), file)
+end
+
+;; Buduje NOWĄ generację z listy pakietów (korzenie) + ich closure i przełącza
+;; `current`. Poprzednie generacje zostają (rollback). Konflikty plików nie
+;; przerywają operacji: wygrywa pierwszy pakiet, reszta jest raportowana.
+pub fn profile_build(l: layout::Layout, roots: [string], note: string) -> ProfileResult is
+    let clos: [string] = closure(l, roots)
+    if clos.len() > 0 && text::starts_with(clos[0], "!") is return pr_fail(clos[0]) end
+    let gens: [int] = list_generations(l)
+    let mut next: int = 1
+    if gens.len() > 0 is next = gens[gens.len() - 1] + 1 end
+    fs::mkdir(layout::pkg_profiles(l))
+    let tmp: string = text::path_join(layout::pkg_profiles(l), ".build." + text::istr(sys::pid()))
+    sys::rm_rf(tmp)
+    fs::mkdir(tmp)
+    let mut conflicts: [string] = []
+    let mut owners: [string] = []   ;; "ścieżka=pakiet"
+    let subs: [string] = profile_subdirs()
+    let mut r: int = 0
+    while r < roots.len() is
+        let sname: string = roots[r]
+        r += 1
+        let mut s: int = 0
+        while s < subs.len() is
+            let sub: string = subs[s]
+            s += 1
+            let src: string = text::path_join(content_path(l, sname), sub)
+            if fs::is_dir(src) is
+                fs::mkdir(text::path_join(tmp, sub))
+                let files: [string] = fs::list_dir(src)
+                let mut f: int = 0
+                while f < files.len() is
+                    let file: string = files[f]
+                    f += 1
+                    let rel: string = sub + "/" + file
+                    let mut owner: string = ""
+                    let mut o: int = 0
+                    while o < owners.len() is
+                        let kv: [string] = text::split_once(owners[o], "=")
+                        if kv[0] == rel is owner = kv[1] end
+                        o += 1
+                    end
+                    if owner != "" is
+                        conflicts.push(rel + ": " + owner + " <-> " + sname)
+                    else is
+                        owners.push(rel + "=" + sname)
+                        let dst: string = text::path_join(text::path_join(tmp, sub), file)
+                        if !sys::symlink(link_target(l, sname, sub, file), dst) is
+                            sys::rm_rf(tmp)
+                            return pr_fail("nie można utworzyć symlinku " + dst)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    ;; packages.toml — co wchodzi w skład generacji (źródło prawdy dla GC i rollbacku)
+    let mut d: lmanifest::Doc = lmanifest::empty()
+    d = lmanifest::put_int(d, "profile", "generation", next)
+    d = lmanifest::put_str(d, "profile", "note", note)
+    d = lmanifest::put_list(d, "profile", "roots", roots)
+    d = lmanifest::put_list(d, "profile", "closure", clos)
+    let se: string = lmanifest::save(text::path_join(tmp, "packages.toml"), d)
+    if se != "" is
+        sys::rm_rf(tmp)
+        return pr_fail(se)
+    end
+    let final: string = profile_dir(l, next)
+    fs::rename(tmp, final)
+    if !fs::is_dir(final) is
+        sys::rm_rf(tmp)
+        return pr_fail("nie można utworzyć generacji " + final)
+    end
+    if !switch_link(current_link(l), text::istr(next)) is
+        return pr_fail("nie można przełączyć " + current_link(l))
+    end
+    return ProfileResult { ok: true, error: "", generation: next, conflicts: conflicts }
+end
+
+;; Korzenie aktualnej generacji ([] gdy brak).
+pub fn current_roots(l: layout::Layout) -> [string] is
+    let g: int = current_generation(l)
+    if g == 0 is return [] end
+    let m: lmanifest::ParseResult = lmanifest::load(text::path_join(profile_dir(l, g), "packages.toml"))
+    if !m.ok is return [] end
+    return lmanifest::get_list(m.doc, "profile", "roots")
+end
+
+;; Cofa `current` do poprzedniej generacji.
+pub fn profile_rollback(l: layout::Layout) -> ProfileResult is
+    let cur: int = current_generation(l)
+    let gens: [int] = list_generations(l)
+    let mut prev: int = 0
+    let mut i: int = 0
+    while i < gens.len() is
+        if gens[i] < cur is prev = gens[i] end
+        i += 1
+    end
+    if prev == 0 is return pr_fail("brak wcześniejszej generacji profilu") end
+    if !switch_link(current_link(l), text::istr(prev)) is return pr_fail("nie można przełączyć current") end
+    return ProfileResult { ok: true, error: "", generation: prev, conflicts: [] }
+end
+
+;; ── GC ──────────────────────────────────────────────────────────────────────
+
+pub struct PkgGcResult is
+    pub ok:      bool
+    pub error:   string
+    pub kept:    int
+    pub removed: [string]
+end
+
+;; Usuwa ze store pakiety spoza closure WSZYSTKICH istniejących generacji
+;; (rollback musi zawsze działać) i korzeni z /packages/roots.
+;; Starsze generacje usuwa się osobno: `profile_prune`.
+pub fn gc(l: layout::Layout, dry_run: bool) -> PkgGcResult is
+    let mut live: [string] = []
+    let gens: [int] = list_generations(l)
+    let mut i: int = 0
+    while i < gens.len() is
+        let m: lmanifest::ParseResult = lmanifest::load(text::path_join(profile_dir(l, gens[i]), "packages.toml"))
+        i += 1
+        if !m.ok is
+            return PkgGcResult { ok: false, error: "uszkodzony packages.toml w generacji " + text::istr(gens[i - 1]), kept: 0, removed: [] }
+        end
+        let c: [string] = lmanifest::get_list(m.doc, "profile", "closure")
+        let mut k: int = 0
+        while k < c.len() is
+            live.push(c[k])
+            k += 1
+        end
+    end
+    let rootsdir: string = layout::pkg_roots(l)
+    if fs::is_dir(rootsdir) is
+        let rs: [string] = fs::list_dir(rootsdir)
+        let mut r: int = 0
+        while r < rs.len() is
+            let name: string = text::trim(fs::read(text::path_join(rootsdir, rs[r])))
+            r += 1
+            if name != "" is
+                let c2: [string] = closure(l, [name])
+                let mut z: int = 0
+                while z < c2.len() is
+                    live.push(c2[z])
+                    z += 1
+                end
+            end
+        end
+    end
+    let all: [string] = list_store(l)
+    let mut removed: [string] = []
+    let mut kept: int = 0
+    let mut a: int = 0
+    while a < all.len() is
+        let n: string = all[a]
+        a += 1
+        let mut isl: bool = false
+        let mut b: int = 0
+        while b < live.len() is
+            if live[b] == n is isl = true end
+            b += 1
+        end
+        if isl is
+            kept += 1
+        else is
+            removed.push(n)
+            if !dry_run is sys::rm_rf(store_path(l, n)) end
+        end
+    end
+    return PkgGcResult { ok: true, error: "", kept: kept, removed: removed }
+end
+
+;; Usuwa stare generacje profilu, zostawiając `keep` najnowszych i aktualną.
+pub fn profile_prune(l: layout::Layout, keep: int) -> int is
+    let gens: [int] = list_generations(l)
+    let cur: int = current_generation(l)
+    let mut removed: int = 0
+    let mut i: int = 0
+    while i < gens.len() - keep is
+        if gens[i] != cur is
+            sys::rm_rf(profile_dir(l, gens[i]))
+            removed += 1
+        end
+        i += 1
+    end
+    return removed
+end
+
+pub fn new_spec(name: string, version: string, arch: string, nevra: string, source: string,
+                src_digest: string, deps: [string]) -> PkgSpec is
+    return PkgSpec { name: name, version: version, arch: arch, nevra: nevra, source: source,
+        src_digest: src_digest, deps: deps }
+end
