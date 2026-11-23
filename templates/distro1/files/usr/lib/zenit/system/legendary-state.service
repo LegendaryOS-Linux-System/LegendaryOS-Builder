@@ -1,0 +1,14 @@
+[Unit]
+Description=LegendaryOS: przygotowanie /state (tmpfiles, machine-id, układ)
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/fasttree layout init --root /
+ExecStart=-/usr/bin/lpm layout-check
+
+[Install]
+WantedBy=basic.target
