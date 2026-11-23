@@ -1,0 +1,12 @@
+[Unit]
+Description=Simple Desktop Display Manager (Blue Environment)
+After=multi-user.target udevd.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sddm
+Restart=on-failure
+
+[Install]
+WantedBy=graphical.target
