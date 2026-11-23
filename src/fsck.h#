@@ -1,0 +1,221 @@
+mod text
+mod hashing
+mod sys
+mod store
+mod manifest
+mod repo
+use "std -> fs" from "fs"
+
+;; Weryfikacja integralności (fsck) na trzech poziomach:
+;;   1. store    — każdy obiekt musi mieć hash równy swojej nazwie (bit rot,
+;;                 ucięte zapisy, ręczne grzebanie w objects/);
+;;   2. manifest — przeliczony root Merkle, kolejność wpisów, obecność chunków
+;;                 w store oraz zgodność sumy rozmiarów chunków z `size` pliku;
+;;   3. repo     — wszystkie manifesty + spójność CURRENT_TAG / pins.
+;; `repair` usuwa uszkodzone obiekty i porzucone pliki *.tmp.* ze store;
+;; NIE naprawia manifestów (nie ma z czego) — brakujące chunki trzeba
+;; dociągnąć ponownym `fasttree pull`.
+
+pub struct StoreFsck is
+    pub ok:        bool
+    pub error:     string
+    pub scanned:   int
+    pub total_bytes: int
+    pub corrupt:   [string]
+    pub repaired:  int
+    pub tmp_files: int
+end
+
+fn store_fsck_fail(msg: string) -> StoreFsck is
+    return StoreFsck { ok: false, error: msg, scanned: 0, total_bytes: 0, corrupt: [], repaired: 0, tmp_files: 0 }
+end
+
+;; Liczba porzuconych plików tymczasowych (objects/*/*.tmp.*).
+pub fn count_tmp(s: store::Store) -> int is
+    let dir: string = text::path_join(s.root, "objects")
+    let r: sys::Exec = sys::exec("find " + sys::sq(dir) + " -type f -name '*.tmp.*' | wc -l")
+    return text::parse_int(r.out, 0)
+end
+
+pub fn check_store(s: store::Store, repair: bool) -> StoreFsck is
+    let all: [string] = store::list_all(s)
+    let n: int = all.len()
+    let mut corrupt: [string] = []
+    let mut nbytes: int = 0
+    let mut repaired: int = 0
+    let mut i: int = 0
+    while i < n is
+        let h: string = all[i]
+        i += 1
+        let g: store::GetResult = store::get(s, h)
+        if !g.ok || !g.found is
+            corrupt.push(h)
+        else is
+            let actual: string = hashing::hash_bytes(g.data)
+            let sz: int = g.data.len()
+            nbytes += sz
+            if actual != h is
+                corrupt.push(h)
+                if repair is
+                    if store::delete_object(s, h) is repaired += 1 end
+                end
+            end
+        end
+    end
+    let tmp: int = count_tmp(s)
+    if repair && tmp > 0 is
+        let dir: string = text::path_join(s.root, "objects")
+        let r: sys::Exec = sys::exec("find " + sys::sq(dir) + " -type f -name '*.tmp.*' -delete")
+        if r.code != 0 is return store_fsck_fail("usuwanie plików tymczasowych nie powiodło się: " + r.out) end
+    end
+    return StoreFsck { ok: true, error: "", scanned: n, total_bytes: nbytes, corrupt: corrupt, repaired: repaired, tmp_files: tmp }
+end
+
+;; ── Manifest ─────────────────────────────────────────────────────────────────
+
+pub struct ManifestFsck is
+    pub root_ok:        bool
+    pub recomputed:     string
+    pub entries:        int
+    pub chunks_checked: int
+    pub missing:        [string]
+    pub size_mismatch:  [string]
+    pub bad_order:      int
+end
+
+pub fn manifest_clean(r: ManifestFsck) -> bool is
+    let nm: int = r.missing.len()
+    let ns: int = r.size_mismatch.len()
+    let bo: int = r.bad_order
+    let ok: bool = r.root_ok
+    return ok && nm == 0 && ns == 0 && bo == 0
+end
+
+pub fn check_manifest(m: manifest::Manifest, s: store::Store) -> ManifestFsck is
+    let recomputed: string = manifest::compute_root(m.entries)
+    let n: int = m.entries.len()
+    let mut missing: [string] = []
+    let mut mismatch: [string] = []
+    let mut bad_order: int = 0
+    let mut checked: int = 0
+    let mut i: int = 0
+    while i < n is
+        let e: manifest::FileEntry = m.entries[i]
+        let path: string = e.path
+        if i > 0 is
+            let prev: string = m.entries[i - 1].path
+            if !(prev < path) is bad_order += 1 end
+        end
+        let mode: string = e.mode
+        let nc: int = e.chunks.len()
+        let mut total: int = 0
+        let mut complete: bool = true
+        let mut k: int = 0
+        while k < nc is
+            let h: string = e.chunks[k]
+            k += 1
+            checked += 1
+            if !store::has(s, h) is
+                missing.push(h)
+                complete = false
+            else is
+                total += store::object_size(s, h)
+            end
+        end
+        if complete && (mode == "regular" || mode == "executable") is
+            let want: int = e.size
+            if total != want is mismatch.push(path) end
+        end
+        i += 1
+    end
+    return ManifestFsck { root_ok: recomputed == m.root, recomputed: recomputed, entries: n,
+        chunks_checked: checked, missing: missing, size_mismatch: mismatch, bad_order: bad_order }
+end
+
+;; ── Repozytorium ─────────────────────────────────────────────────────────────
+
+pub struct RepoFsck is
+    pub ok:       bool
+    pub error:    string
+    pub store:    StoreFsck
+    pub tags:     int
+    pub problems: [string]
+end
+
+fn repo_fsck_fail(msg: string) -> RepoFsck is
+    return RepoFsck { ok: false, error: msg, store: store_fsck_fail(msg), tags: 0, problems: [] }
+end
+
+;; Sprawdza store pod <root>/store i wszystkie manifesty z <root>/manifests.
+;; `ok` oznacza tylko, że sprawdzenie się wykonało; o zdrowiu repo mówi
+;; `problems` (puste = repo zdrowe) — patrz `repo_healthy`.
+pub fn check_repo(root: string, repair: bool) -> RepoFsck is
+    let o: store::OpenResult = store::open(text::path_join(root, "store"))
+    if !o.ok is return repo_fsck_fail(o.error) end
+    let sf: StoreFsck = check_store(o.store, repair)
+    if !sf.ok is return repo_fsck_fail(sf.error) end
+    let mut problems: [string] = []
+    let nc: int = sf.corrupt.len()
+    let mut ci: int = 0
+    while ci < nc is
+        let h: string = sf.corrupt[ci]
+        ci += 1
+        if repair is
+            problems.push("uszkodzony obiekt (usunięty): " + h)
+        else is
+            problems.push("uszkodzony obiekt: " + h)
+        end
+    end
+    let tags: [string] = repo::list_tags(root)
+    let nt: int = tags.len()
+    let mut i: int = 0
+    while i < nt is
+        let tag: string = tags[i]
+        i += 1
+        let pr: manifest::ParseResult = manifest::load(manifest::manifest_path_in(root, tag))
+        if !pr.ok is
+            problems.push("manifest '" + tag + "': " + pr.error)
+        else is
+            let mf: ManifestFsck = check_manifest(pr.manifest, o.store)
+            if !mf.root_ok is
+                problems.push("manifest '" + tag + "': root nie zgadza się z wpisami (zapisany " + pr.manifest.root + ", policzony " + mf.recomputed + ")")
+            end
+            let nm: int = mf.missing.len()
+            if nm > 0 is
+                problems.push("manifest '" + tag + "': brakuje " + text::istr(nm) + " chunków w store")
+            end
+            let ns: int = mf.size_mismatch.len()
+            if ns > 0 is
+                problems.push("manifest '" + tag + "': " + text::istr(ns) + " plików o rozmiarze niezgodnym z chunkami (pierwszy: " + mf.size_mismatch[0] + ")")
+            end
+            let bo: int = mf.bad_order
+            if bo > 0 is
+                problems.push("manifest '" + tag + "': " + text::istr(bo) + " wpisów w złej kolejności lub zduplikowanych")
+            end
+        end
+    end
+    let cur: string = repo::current_tag(root)
+    if cur != "" && !fs::exists(manifest::manifest_path_in(root, cur)) is
+        problems.push("CURRENT_TAG '" + cur + "' nie ma manifestu")
+    end
+    let pins: repo::PinsResult = repo::list_pins(root)
+    if !pins.ok is
+        problems.push(pins.error)
+    else is
+        let np: int = pins.pins.len()
+        let mut k: int = 0
+        while k < np is
+            let pt: string = pins.pins[k].tag
+            k += 1
+            if !fs::exists(manifest::manifest_path_in(root, pt)) is
+                problems.push("przypięty tag '" + pt + "' nie ma manifestu")
+            end
+        end
+    end
+    return RepoFsck { ok: true, error: "", store: sf, tags: nt, problems: problems }
+end
+
+pub fn repo_healthy(r: RepoFsck) -> bool is
+    let n: int = r.problems.len()
+    return r.ok && n == 0
+end
