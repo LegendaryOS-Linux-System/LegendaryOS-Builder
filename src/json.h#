@@ -1,0 +1,339 @@
+mod text
+mod hashing
+
+;; Minimalny parser i serializator JSON (std -> json w H# 0.9 to tylko
+;; płaskie operacje tekstowe, nie prawdziwy parser). Wystarcza dla manifestów,
+;; pins.json i odpowiedzi rejestru OCI.
+;;
+;; Wartość: kind 0 null | 1 bool | 2 liczba całkowita | 3 napis | 4 tablica
+;; | 5 obiekt. Dla obiektu `keys[i]` ↔ `items[i]` (kolejność zachowana).
+
+pub struct J is
+    pub kind:  int
+    pub s:     string
+    pub n:     int
+    pub items: [J]
+    pub keys:  [string]
+end
+
+pub fn jnull() -> J is
+    return J { kind: 0, s: "", n: 0, items: [], keys: [] }
+end
+
+pub fn jbool(b: bool) -> J is
+    let mut v: int = 0
+    if b is v = 1 end
+    return J { kind: 1, s: "", n: v, items: [], keys: [] }
+end
+
+pub fn jint(n: int) -> J is
+    return J { kind: 2, s: "", n: n, items: [], keys: [] }
+end
+
+pub fn jstr(s: string) -> J is
+    return J { kind: 3, s: s, n: 0, items: [], keys: [] }
+end
+
+pub fn jarr(items: [J]) -> J is
+    return J { kind: 4, s: "", n: 0, items: items, keys: [] }
+end
+
+pub fn jobj() -> J is
+    return J { kind: 5, s: "", n: 0, items: [], keys: [] }
+end
+
+;; Dopisuje pole do obiektu (bez deduplikacji kluczy).
+pub fn set(o: J, key: string, v: J) is
+    o.keys.push(key)
+    o.items.push(v)
+end
+
+pub fn has(o: J, key: string) -> bool is
+    let n: int = o.keys.len()
+    let mut i: int = 0
+    while i < n is
+        if o.keys[i] == key is return true end
+        i += 1
+    end
+    return false
+end
+
+pub fn get(o: J, key: string) -> J is
+    let n: int = o.keys.len()
+    let mut i: int = 0
+    while i < n is
+        if o.keys[i] == key is return o.items[i] end
+        i += 1
+    end
+    return jnull()
+end
+
+pub fn as_str(j: J, dflt: string) -> string is
+    if j.kind == 3 is return j.s end
+    return dflt
+end
+
+pub fn as_int(j: J, dflt: int) -> int is
+    if j.kind == 2 is return j.n end
+    return dflt
+end
+
+pub fn count(j: J) -> int is
+    return j.items.len()
+end
+
+;; ── Serializacja ─────────────────────────────────────────────────────────────
+
+;; Literały z `{`...`}` są w H# interpolowane ("{}" daje pusty napis), więc
+;; nawiasy klamrowe składamy z kodów znaków.
+fn lb() -> string is return __builtin_char_code_to_str(123) end
+fn rb() -> string is return __builtin_char_code_to_str(125) end
+
+fn hex4(n: int) -> string is
+    let a: int = n / 4096
+    let b: int = (n / 256) % 16
+    let c: int = (n / 16) % 16
+    let d: int = n % 16
+    return hashing::hex_digit(a) + hashing::hex_digit(b) + hashing::hex_digit(c) + hashing::hex_digit(d)
+end
+
+pub fn escape(s: string) -> string is
+    let mut out: string = "\""
+    let n: int = s.len()
+    let mut i: int = 0
+    while i < n is
+        let c: string = s[i..i + 1]
+        let code: int = __builtin_str_to_char_code(c)
+        if c == "\"" is
+            out = out + "\\\""
+        else if c == "\\" is
+            out = out + "\\\\"
+        else if code == 10 is
+            out = out + "\\n"
+        else if code == 13 is
+            out = out + "\\r"
+        else if code == 9 is
+            out = out + "\\t"
+        else if code < 32 is
+            out = out + "\\u" + hex4(code)
+        else is
+            out = out + c
+        end
+        i += 1
+    end
+    return out + "\""
+end
+
+fn pad(depth: int) -> string is
+    let mut s: string = ""
+    let mut i: int = 0
+    while i < depth is
+        s = s + "  "
+        i += 1
+    end
+    return s
+end
+
+;; pretty = true -> wcięcie 2 spacje.
+pub fn dump(j: J, pretty: bool, depth: int) -> string is
+    let k: int = j.kind
+    if k == 0 is return "null" end
+    if k == 1 is
+        if j.n != 0 is return "true" end
+        return "false"
+    end
+    if k == 2 is return text::istr(j.n) end
+    if k == 3 is return escape(j.s) end
+    let cnt: int = j.items.len()
+    if k == 4 is
+        if cnt == 0 is return "[]" end
+        let mut parts: [string] = []
+        let mut i: int = 0
+        while i < cnt is
+            parts.push(dump(j.items[i], pretty, depth + 1))
+            i += 1
+        end
+        if !pretty is return "[" + text::join(parts, ",") + "]" end
+        let inner: string = pad(depth + 1)
+        return "[\n" + inner + text::join(parts, ",\n" + inner) + "\n" + pad(depth) + "]"
+    end
+    if cnt == 0 is return lb() + rb() end
+    let mut parts2: [string] = []
+    let mut m: int = 0
+    while m < cnt is
+        let kk: string = escape(j.keys[m])
+        let vv: string = dump(j.items[m], pretty, depth + 1)
+        if pretty is
+            parts2.push(kk + ": " + vv)
+        else is
+            parts2.push(kk + ":" + vv)
+        end
+        m += 1
+    end
+    if !pretty is return lb() + text::join(parts2, ",") + rb() end
+    let inner2: string = pad(depth + 1)
+    return lb() + "\n" + inner2 + text::join(parts2, ",\n" + inner2) + "\n" + pad(depth) + rb()
+end
+
+pub fn to_json(j: J) -> string is
+    return dump(j, false, 0)
+end
+
+pub fn to_pretty(j: J) -> string is
+    return dump(j, true, 0)
+end
+
+;; ── Parser ───────────────────────────────────────────────────────────────────
+
+pub struct Parsed is
+    pub ok:    bool
+    pub error: string
+    pub value: J
+end
+
+struct PR is
+    pub ok:  bool
+    pub err: string
+    pub v:   J
+    pub pos: int
+end
+
+fn fail(msg: string, pos: int) -> PR is
+    return PR { ok: false, err: msg + " (pozycja " + text::istr(pos) + ")", v: jnull(), pos: pos }
+end
+
+fn skip_ws(s: string, p: int) -> int is
+    let n: int = s.len()
+    let mut i: int = p
+    while i < n is
+        let c: string = s[i..i + 1]
+        if c == " " || c == "\n" || c == "\t" || c == "\r" is
+            i += 1
+        else is
+            return i
+        end
+    end
+    return i
+end
+
+fn parse_string(s: string, p: int) -> PR is
+    ;; s[p] == '"'
+    let n: int = s.len()
+    let mut i: int = p + 1
+    let mut out: string = ""
+    while i < n is
+        let c: string = s[i..i + 1]
+        if c == "\"" is
+            return PR { ok: true, err: "", v: jstr(out), pos: i + 1 }
+        end
+        if c == "\\" is
+            if i + 1 >= n is return fail("urwany napis", i) end
+            let e: string = s[i + 1..i + 2]
+            if e == "n" is out = out + "\n"
+            else if e == "t" is out = out + "\t"
+            else if e == "r" is out = out + "\r"
+            else if e == "b" is out = out + __builtin_char_code_to_str(8)
+            else if e == "f" is out = out + __builtin_char_code_to_str(12)
+            else if e == "u" is
+                if i + 6 > n is return fail("zła sekwencja \\u", i) end
+                let hx: [int] = hashing::hex_decode(s[i + 2..i + 6])
+                let hn: int = hx.len()
+                if hn != 2 is return fail("zła sekwencja \\u", i) end
+                let cp: int = hx[0] * 256 + hx[1]
+                out = out + __builtin_char_code_to_str(cp)
+                i += 4
+            else is
+                out = out + e
+            end
+            i += 2
+        else is
+            out = out + c
+            i += 1
+        end
+    end
+    return fail("niezamknięty napis", p)
+end
+
+fn parse_value(s: string, p0: int, depth: int) -> PR is
+    let limit: int = 200
+    if depth > limit is return fail("zbyt głębokie zagnieżdżenie", p0) end
+    let n: int = s.len()
+    let p: int = skip_ws(s, p0)
+    if p >= n is return fail("nieoczekiwany koniec danych", p) end
+    let c: string = s[p..p + 1]
+    if c == lb() is
+        let o: J = jobj()
+        let mut i: int = skip_ws(s, p + 1)
+        if i < n && s[i..i + 1] == rb() is
+            return PR { ok: true, err: "", v: o, pos: i + 1 }
+        end
+        while true is
+            i = skip_ws(s, i)
+            if i >= n || s[i..i + 1] != "\"" is return fail("oczekiwano klucza", i) end
+            let k: PR = parse_string(s, i)
+            if !k.ok is return k end
+            i = skip_ws(s, k.pos)
+            if i >= n || s[i..i + 1] != ":" is return fail("oczekiwano ':'", i) end
+            let v: PR = parse_value(s, i + 1, depth + 1)
+            if !v.ok is return v end
+            set(o, k.v.s, v.v)
+            i = skip_ws(s, v.pos)
+            if i >= n is return fail("niezamknięty obiekt", i) end
+            let d: string = s[i..i + 1]
+            if d == "," is
+                i += 1
+            else if d == rb() is
+                return PR { ok: true, err: "", v: o, pos: i + 1 }
+            else is
+                return fail("oczekiwano ',' lub zamknięcia obiektu", i)
+            end
+        end
+    end
+    if c == "[" is
+        let a: J = jarr([])
+        let mut i: int = skip_ws(s, p + 1)
+        if i < n && s[i..i + 1] == "]" is
+            return PR { ok: true, err: "", v: a, pos: i + 1 }
+        end
+        while true is
+            let v: PR = parse_value(s, i, depth + 1)
+            if !v.ok is return v end
+            a.items.push(v.v)
+            i = skip_ws(s, v.pos)
+            if i >= n is return fail("niezamknięta tablica", i) end
+            let d: string = s[i..i + 1]
+            if d == "," is
+                i += 1
+            else if d == "]" is
+                return PR { ok: true, err: "", v: a, pos: i + 1 }
+            else is
+                return fail("oczekiwano ',' lub ']'", i)
+            end
+        end
+    end
+    if c == "\"" is return parse_string(s, p) end
+    if text::starts_with(s[p..n], "true") is return PR { ok: true, err: "", v: jbool(true), pos: p + 4 } end
+    if text::starts_with(s[p..n], "false") is return PR { ok: true, err: "", v: jbool(false), pos: p + 5 } end
+    if text::starts_with(s[p..n], "null") is return PR { ok: true, err: "", v: jnull(), pos: p + 4 } end
+    ;; liczba całkowita (ułamki/wykładniki nie występują w naszych formatach)
+    let mut i: int = p
+    if s[i..i + 1] == "-" is i += 1 end
+    let ds: int = i
+    while i < n is
+        let code: int = __builtin_str_to_char_code(s[i..i + 1])
+        if code >= 48 && code <= 57 is i += 1 else is break end
+    end
+    if i == ds is return fail("nieoczekiwany znak '" + c + "'", p) end
+    return PR { ok: true, err: "", v: jint(text::parse_int(s[p..i], 0)), pos: i }
+end
+
+pub fn parse(s: string) -> Parsed is
+    let r: PR = parse_value(s, 0, 0)
+    if !r.ok is return Parsed { ok: false, error: r.err, value: jnull() } end
+    let n: int = s.len()
+    let e: int = skip_ws(s, r.pos)
+    if e < n is
+        return Parsed { ok: false, error: "dane po końcu wartości JSON (pozycja " + text::istr(e) + ")", value: jnull() }
+    end
+    return Parsed { ok: true, error: "", value: r.v }
+end
