@@ -1,0 +1,201 @@
+mod text
+mod sys
+mod store
+mod manifest
+mod repo
+mod derive
+mod layout
+mod lmanifest
+use "std -> fs" from "fs"
+
+;; ── Wdrożenia systemu (odpowiednik rpm-ostree „deployments”) ────────────────
+;;
+;; Wdrożenie = tag FastTree (obraz /system) + manifest.toml + rekord w
+;; /state/deployments/<tag>.toml. Zmiana systemu NIGDY nie modyfikuje
+;; działającego obrazu:
+;;
+;;   1. stage_layered(): baza + zmiany (np. rozpakowane RPM-y) -> NOWY tag
+;;      (derive), z nowym manifest.toml (generacja+1, parent, lista warstw)
+;;   2. rekord ma status "staged"; w <ft_root>/PENDING_TAG ląduje nowy tag
+;;   3. `fasttree deploy <tag> --atomic` buduje obraz composefs i podmienia
+;;      symlink `current` (rename(2)) — nowy system startuje po restarcie
+;;   4. rollback = powrót do PREVIOUS_TAG (repo::rollback), też atomowo
+;;
+;; Katalog zmian (`changes_dir`) ma już układ /system (usr/ z RPM -> system/),
+;; mapowanie robi lpm przed wywołaniem stage_layered().
+
+pub struct Record is
+    pub tag:        string
+    pub parent:     string
+    pub generation: int
+    pub kind:       string   ;; "base" | "layered"
+    pub status:     string   ;; "staged" | "deployed" | "failed"
+    pub created:    string
+end
+
+pub struct StageResult is
+    pub ok:      bool
+    pub error:   string
+    pub tag:     string
+    pub changed: int
+    pub deleted: int
+end
+
+fn sfail(msg: string) -> StageResult is
+    return StageResult { ok: false, error: msg, tag: "", changed: 0, deleted: 0 }
+end
+
+pub fn record_path(l: layout::Layout, tag: string) -> string is
+    return text::path_join(layout::deployments_dir(l), tag + ".toml")
+end
+
+pub fn manifest_copy_path(l: layout::Layout, tag: string) -> string is
+    return text::path_join(layout::deployments_dir(l), tag + ".manifest.toml")
+end
+
+pub fn pending_tag(l: layout::Layout) -> string is
+    return repo::read_state(layout::ft_root(l), "PENDING_TAG")
+end
+
+fn save_record(l: layout::Layout, r: Record) -> string is
+    fs::mkdir(layout::deployments_dir(l))
+    let mut d: lmanifest::Doc = lmanifest::empty()
+    d = lmanifest::put_str(d, "deployment", "tag", r.tag)
+    d = lmanifest::put_str(d, "deployment", "parent", r.parent)
+    d = lmanifest::put_int(d, "deployment", "generation", r.generation)
+    d = lmanifest::put_str(d, "deployment", "kind", r.kind)
+    d = lmanifest::put_str(d, "deployment", "status", r.status)
+    d = lmanifest::put_str(d, "deployment", "created", r.created)
+    return lmanifest::save(record_path(l, r.tag), d)
+end
+
+pub fn load_record(l: layout::Layout, tag: string) -> Record is
+    let m: lmanifest::ParseResult = lmanifest::load(record_path(l, tag))
+    if !m.ok is
+        return Record { tag: tag, parent: "", generation: 0, kind: "", status: "missing", created: "" }
+    end
+    return Record { tag: tag,
+        parent: lmanifest::get(m.doc, "deployment", "parent", ""),
+        generation: lmanifest::get_int(m.doc, "deployment", "generation", 0),
+        kind: lmanifest::get(m.doc, "deployment", "kind", ""),
+        status: lmanifest::get(m.doc, "deployment", "status", ""),
+        created: lmanifest::get(m.doc, "deployment", "created", "") }
+end
+
+pub fn set_status(l: layout::Layout, tag: string, status: string) -> string is
+    let r: Record = load_record(l, tag)
+    if r.status == "missing" is return "brak rekordu wdrożenia " + tag end
+    return save_record(l, Record { tag: r.tag, parent: r.parent, generation: r.generation,
+        kind: r.kind, status: status, created: r.created })
+end
+
+pub fn list_records(l: layout::Layout) -> [Record] is
+    let mut out: [Record] = []
+    let dir: string = layout::deployments_dir(l)
+    if !fs::is_dir(dir) is return out end
+    let files: [string] = fs::list_dir(dir)
+    let mut i: int = 0
+    while i < files.len() is
+        let f: string = files[i]
+        i += 1
+        if text::ends_with(f, ".toml") && !text::ends_with(f, ".manifest.toml") is
+            let tag: string = f[0..f.len() - 5]
+            out.push(load_record(l, tag))
+        end
+    end
+    return out
+end
+
+;; Rejestruje wdrożenie bazowe (po `fasttree snapshot` / `pull`) razem z manifestem.
+pub fn register_base(l: layout::Layout, tag: string, doc: lmanifest::Doc, now: string) -> string is
+    let probs: [string] = lmanifest::validate_manifest(doc)
+    if probs.len() > 0 is return "manifest.toml: " + probs[0] end
+    fs::mkdir(layout::deployments_dir(l))
+    let me: string = lmanifest::save(manifest_copy_path(l, tag), doc)
+    if me != "" is return me end
+    return save_record(l, Record { tag: tag, parent: "", generation: lmanifest::get_int(doc, "deployment", "generation", 1),
+        kind: "base", status: "deployed", created: now })
+end
+
+;; Manifest wdrożenia: kopia z /state/deployments albo (dla aktywnego) /manifest.toml.
+pub fn manifest_of(l: layout::Layout, tag: string) -> lmanifest::ParseResult is
+    let c: string = manifest_copy_path(l, tag)
+    if fs::exists(c) is return lmanifest::load(c) end
+    return lmanifest::load(l.manifest)
+end
+
+;; Warstwa = [nazwa, nevra, repo].
+pub struct Layer is
+    pub name:  string
+    pub nevra: string
+    pub repo:  string
+end
+
+;; baza + zmiany -> nowy tag. `changes_dir` zostaje uzupełniony o nowy manifest.toml.
+pub fn stage_layered(l: layout::Layout, base_tag: string, changes_dir: string, new_tag: string,
+                     layers: [Layer], now: string) -> StageResult is
+    let root: string = layout::ft_root(l)
+    if !repo::valid_tag(new_tag) is return sfail("niepoprawny tag: " + new_tag) end
+    if !fs::exists(manifest::manifest_path_in(root, base_tag)) is
+        return sfail("brak manifestu bazy '" + base_tag + "' w " + root)
+    end
+    if fs::exists(manifest::manifest_path_in(root, new_tag)) is
+        return sfail("tag '" + new_tag + "' już istnieje")
+    end
+    if !fs::is_dir(changes_dir) is return sfail("brak katalogu zmian " + changes_dir) end
+    let bm: lmanifest::ParseResult = manifest_of(l, base_tag)
+    if !bm.ok is return sfail("manifest bazy: " + bm.error) end
+    let probs: [string] = lmanifest::validate_manifest(bm.doc)
+    if probs.len() > 0 is return sfail("manifest bazy niepoprawny: " + probs[0]) end
+    let gen: int = lmanifest::get_int(bm.doc, "deployment", "generation", 1) + 1
+    let mut d: lmanifest::Doc = bm.doc
+    d = lmanifest::put_str(d, "deployment", "tag", new_tag)
+    d = lmanifest::put_str(d, "deployment", "parent", base_tag)
+    d = lmanifest::put_int(d, "deployment", "generation", gen)
+    d = lmanifest::put_str(d, "deployment", "kind", "layered")
+    d = lmanifest::put_str(d, "deployment", "created", now)
+    let mut i: int = 0
+    while i < layers.len() is
+        let ly: Layer = layers[i]
+        d = lmanifest::add_layer(d, ly.name, ly.nevra, ly.repo)
+        i += 1
+    end
+    let me: string = lmanifest::save(text::path_join(changes_dir, "manifest.toml"), d)
+    if me != "" is return sfail(me) end
+    let dr: derive::DeriveResult = derive::derive(root, base_tag, changes_dir, new_tag)
+    if !dr.ok is return sfail("derive: " + dr.error) end
+    fs::mkdir(layout::deployments_dir(l))
+    let ce: string = lmanifest::save(manifest_copy_path(l, new_tag), d)
+    if ce != "" is return sfail(ce) end
+    let re: string = save_record(l, Record { tag: new_tag, parent: base_tag, generation: gen,
+        kind: "layered", status: "staged", created: now })
+    if re != "" is return sfail(re) end
+    if !fs::write(text::path_join(root, "PENDING_TAG"), new_tag) is return sfail("nie można zapisać PENDING_TAG") end
+    return StageResult { ok: true, error: "", tag: new_tag, changed: dr.changed, deleted: dr.deleted }
+end
+
+;; Po udanym `fasttree deploy` — oznacza oczekujące wdrożenie jako wdrożone.
+pub fn mark_deployed(l: layout::Layout, tag: string) -> string is
+    let e: string = set_status(l, tag, "deployed")
+    if e != "" is return e end
+    let p: string = text::path_join(layout::ft_root(l), "PENDING_TAG")
+    if repo::read_state(layout::ft_root(l), "PENDING_TAG") == tag is sys::rm_f(p) end
+    return ""
+end
+
+;; Odrzuca oczekujące wdrożenie (usuwa tag + rekord). Aktywnego nie ruszy (repo::remove_tag odmówi).
+pub fn discard_pending(l: layout::Layout) -> string is
+    let t: string = pending_tag(l)
+    if t == "" is return "brak oczekującego wdrożenia" end
+    let r: repo::RepoResult = repo::remove_tag(layout::ft_root(l), t)
+    if !r.ok is return r.error end
+    sys::rm_f(record_path(l, t))
+    sys::rm_f(manifest_copy_path(l, t))
+    sys::rm_f(text::path_join(layout::ft_root(l), "PENDING_TAG"))
+    return ""
+end
+
+;; Konstruktor (literały struktur przez alias biblioteki nie działają w H# 0.9).
+pub fn new_layer(name: string, nevra: string, repo: string) -> Layer is
+    return Layer { name: name, nevra: nevra, repo: repo }
+end
