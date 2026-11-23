@@ -1,0 +1,5 @@
+[user]
+-> name         => legendaryos
+-> organization => LegendaryOS
+-> registry     => ghcr.io
+-> token        => env:GITHUB_TOKEN
