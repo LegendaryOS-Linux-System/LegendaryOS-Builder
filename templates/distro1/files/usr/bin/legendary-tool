@@ -1,0 +1,6 @@
+#!/bin/sh
+# legendary-tool <nazwa> [argumenty...] — uruchamia narzędzie z /tools (montuje squashfs przy pierwszym użyciu).
+set -eu
+name="${1:?użycie: legendary-tool <nazwa> [args...]}"; shift
+exe="$(lpm tools path "$name")"
+exec "$exe" "$@"
