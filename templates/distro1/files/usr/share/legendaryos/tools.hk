@@ -1,0 +1,13 @@
+[tools]
+-> hacker-lang
+--> git   => https://github.com/HackerOS-Linux-System/Hacker-Lang
+--> entry => bin/hl
+-> h-sharp
+--> git   => https://github.com/HackerOS-Linux-System/H-Sharp
+--> entry => bin/h#
+-> bit
+--> git   => https://github.com/bit-io/bit
+--> entry => bin/bit
+-> zenitd-tools
+--> git   => https://github.com/Zenit-Linux/zenitd
+--> entry => scripts/install.sh
