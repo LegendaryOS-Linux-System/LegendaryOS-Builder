@@ -1,0 +1,158 @@
+mod text
+mod sys
+use "std -> fs" from "fs"
+use "std -> process" from "proc"
+
+;; OverlayFS: trwałe i ulotne (tmpfs) nakładki na obraz tylko-do-odczytu —
+;; wymaga uprawnień do `mount`.
+
+pub struct Overlay is
+    pub lowerdir:   string
+    pub upperdir:   string
+    pub workdir:    string
+    pub mountpoint: string
+    ;; true = upperdir/workdir w tmpfs (znikają po odmontowaniu);
+    ;; false = zwykłe katalogi na dysku, przeżywają odmontowanie.
+    pub ephemeral:  bool
+    ;; punkt montowania tmpfs (tryb ulotny) — odmontować PO samym overlayu.
+    pub tmpfs_mount: string
+end
+
+pub struct OverlayResult is
+    pub ok:      bool
+    pub error:   string
+    pub overlay: Overlay
+end
+
+fn no_overlay() -> Overlay is
+    return Overlay { lowerdir: "", upperdir: "", workdir: "", mountpoint: "", ephemeral: false, tmpfs_mount: "" }
+end
+
+fn oerr(m: string) -> OverlayResult is
+    return OverlayResult { ok: false, error: m, overlay: no_overlay() }
+end
+
+;; Sprawdza /proc/filesystems zamiast na ślepo próbować mount. "" = OK.
+pub fn require_overlayfs() -> string is
+    if !fs::exists("/proc/filesystems") is return "" end
+    let c: string = fs::read("/proc/filesystems")
+    if !text::contains(c, "overlay") is
+        return "Jądro nie zgłasza wsparcia dla overlay w /proc/filesystems — OverlayFS (CONFIG_OVERLAY_FS) wymagane dla `fasttree overlay`."
+    end
+    return ""
+end
+
+fn do_mount_overlay(lowerdir: string, upperdir: string, workdir: string, mountpoint: string) -> string is
+    fs::mkdir(mountpoint)
+    let opts: string = "lowerdir=" + lowerdir + ",upperdir=" + upperdir + ",workdir=" + workdir
+    let r: sys::Exec = sys::exec("mount -t overlay overlay -o " + sys::sq(opts) + " " + sys::sq(mountpoint))
+    if r.code != 0 is return "mount -t overlay nie powiodło się: " + r.out end
+    return ""
+end
+
+;; Trwały overlay: upperdir/workdir pod <ft_root>/overlays/<name>/.
+pub fn new_persistent_overlay(lowerdir: string, ft_root: string, name: string, mountpoint: string) -> OverlayResult is
+    let te: string = require_overlayfs()
+    if te != "" is return oerr(te) end
+    let base: string = text::path_join(text::path_join(ft_root, "overlays"), name)
+    let upper: string = text::path_join(base, "upper")
+    let work: string = text::path_join(base, "work")
+    fs::mkdir(upper)
+    fs::mkdir(work)
+    let e: string = do_mount_overlay(lowerdir, upper, work, mountpoint)
+    if e != "" is return oerr(e) end
+    return OverlayResult { ok: true, error: "", overlay: Overlay { lowerdir: lowerdir, upperdir: upper,
+        workdir: work, mountpoint: mountpoint, ephemeral: false, tmpfs_mount: "" } }
+end
+
+;; Ulotny overlay: upperdir/workdir w tmpfs pod `<mountpoint>.tmpfs`.
+pub fn new_tmp_overlay(lowerdir: string, mountpoint: string, size_mb: int) -> OverlayResult is
+    let te: string = require_overlayfs()
+    if te != "" is return oerr(te) end
+    let tmpfs: string = mountpoint + ".tmpfs"
+    fs::mkdir(tmpfs)
+    let m: sys::Exec = sys::exec("mount -t tmpfs -o size=" + text::istr(size_mb) + "m tmpfs " + sys::sq(tmpfs))
+    if m.code != 0 is return oerr("mount tmpfs (dla ulotnego upperdir) nie powiodło się: " + m.out) end
+    let upper: string = text::path_join(tmpfs, "upper")
+    let work: string = text::path_join(tmpfs, "work")
+    fs::mkdir(upper)
+    fs::mkdir(work)
+    let e: string = do_mount_overlay(lowerdir, upper, work, mountpoint)
+    if e != "" is
+        let u: sys::Exec = sys::exec("umount " + sys::sq(tmpfs))
+        return oerr(e)
+    end
+    return OverlayResult { ok: true, error: "", overlay: Overlay { lowerdir: lowerdir, upperdir: upper,
+        workdir: work, mountpoint: mountpoint, ephemeral: true, tmpfs_mount: tmpfs } }
+end
+
+;; Kolejność ma znaczenie: najpierw overlay, potem tmpfs. Zwraca "" lub błąd.
+pub fn unmount_overlay(ov: Overlay) -> string is
+    let r1: sys::Exec = sys::exec("umount " + sys::sq(ov.mountpoint))
+    if r1.code != 0 is return "umount overlay nie powiodło się: " + r1.out end
+    let tm: string = ov.tmpfs_mount
+    if ov.ephemeral && tm != "" is
+        let r2: sys::Exec = sys::exec("umount " + sys::sq(tm))
+        if r2.code != 0 is return "umount tmpfs (upperdir ulotny) nie powiodło się: " + r2.out end
+    end
+    return ""
+end
+
+pub struct OverlayInfo is
+    pub name:       string
+    pub mountpoint: string
+    pub upperdir:   string
+    pub ephemeral:  bool
+    ;; true tylko gdy mountpoint figuruje jako aktywny overlay w /proc/mounts.
+    pub mounted:    bool
+end
+
+fn is_mounted(mountpoint: string) -> bool is
+    if !fs::exists("/proc/mounts") is return false end
+    let abs: string = text::trim(proc::run_args("realpath", ["-m", mountpoint]))
+    let lines: [string] = text::lines(fs::read("/proc/mounts"))
+    let n: int = lines.len()
+    let mut i: int = 0
+    while i < n is
+        let parts: [string] = text::split(lines[i], " ")
+        let pn: int = parts.len()
+        if pn >= 3 is
+            let fst: string = parts[2]
+            let mp: string = parts[1]
+            if fst == "overlay" && mp == abs is return true end
+        end
+        i += 1
+    end
+    return false
+end
+
+;; `<ft_root>/overlay-mounts/*` — każdy wpis to overlay utworzony przez CLI.
+pub fn list_active_overlays(ft_root: string) -> [OverlayInfo] is
+    let mut out: [OverlayInfo] = []
+    let dir: string = text::path_join(ft_root, "overlay-mounts")
+    if !fs::is_dir(dir) is return out end
+    let names: [string] = fs::list_dir(dir)
+    let n: int = names.len()
+    let mut i: int = 0
+    while i < n is
+        let name: string = names[i]
+        i += 1
+        let path: string = text::path_join(dir, name)
+        if !fs::is_dir(path) || text::ends_with(name, ".tmpfs") is continue end
+        let eph: bool = fs::is_dir(path + ".tmpfs")
+        let mut upper: string = text::path_join(text::path_join(text::path_join(ft_root, "overlays"), name), "upper")
+        if eph is upper = text::path_join(path + ".tmpfs", "upper") end
+        out.push(OverlayInfo { name: name, mountpoint: path, upperdir: upper, ephemeral: eph, mounted: is_mounted(path) })
+    end
+    return out
+end
+
+;; Ścieżki (względne) zmienione względem lowerdir = zawartość upperdir
+;; (pliki, symlinki i whiteouty; same katalogi pomijamy — jak walkDirRec).
+pub fn list_changes(ov: Overlay) -> [string] is
+    let mut out: [string] = []
+    let up: string = ov.upperdir
+    if !fs::is_dir(up) is return out end
+    let raw: string = proc::run_args("find", [up, "-mindepth", "1", "-not", "-type", "d", "-printf", "%P\n"])
+    return text::lines(raw)
+end
