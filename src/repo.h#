@@ -1,0 +1,232 @@
+mod text
+mod json
+mod sys
+mod manifest
+use "std -> fs" from "fs"
+
+;; Operacje na poziomie repozytorium FastTree (katalog `root`, domyślnie
+;; /var/lib/fasttree): tagi, pins, rollback, usuwanie tagów. Wszystkie funkcje
+;; biorą `root` jawnie (bez zmiennych środowiskowych), więc działają tak samo
+;; z CLI, z C ABI i z testów.
+;;
+;; Układ katalogu (patrz cli.h#):
+;;   manifests/<tag>.json       manifesty
+;;   deployments/<tag>.erofs    obrazy composefs (+ .digest, .veritysum,
+;;                              .verity-hashtree, .materialized/)
+;;   current                    symlink na aktywny obraz
+;;   CURRENT_TAG / PREVIOUS_TAG tagi aktywnego i poprzedniego wdrożenia
+;;   pins.json                  [{"tag", "note", "pinnedAt"}]
+
+pub struct RepoResult is
+    pub ok:    bool
+    pub error: string
+    pub value: string
+end
+
+fn rok(v: string) -> RepoResult is return RepoResult { ok: true, error: "", value: v } end
+fn rerr(m: string) -> RepoResult is return RepoResult { ok: false, error: m, value: "" } end
+
+;; Sortowanie napisów przez scalanie (porównanie bajtowe).
+pub fn sort_strings(xs: [string]) -> [string] is
+    let n: int = xs.len()
+    if n <= 1 is return xs end
+    let mid: int = n / 2
+    let left: [string] = sort_strings(xs[0..mid])
+    let right: [string] = sort_strings(xs[mid..n])
+    let ln: int = left.len()
+    let rn: int = right.len()
+    let mut out: [string] = []
+    let mut i: int = 0
+    let mut j: int = 0
+    while i < ln && j < rn is
+        let a: string = left[i]
+        let b: string = right[j]
+        if b < a is
+            out.push(b)
+            j += 1
+        else is
+            out.push(a)
+            i += 1
+        end
+    end
+    while i < ln is
+        out.push(left[i])
+        i += 1
+    end
+    while j < rn is
+        out.push(right[j])
+        j += 1
+    end
+    return out
+end
+
+;; Poprawna nazwa tagu: niepusta, bez '/', bez "..", bez znaków sterujących.
+;; Chroni przed wyjściem poza katalog manifests/ przy usuwaniu i odczycie.
+pub fn valid_tag(tag: string) -> bool is
+    let n: int = tag.len()
+    if n == 0 || n > 200 is return false end
+    if text::contains(tag, "/") || text::contains(tag, "..") is return false end
+    let mut i: int = 0
+    while i < n is
+        let c: int = __builtin_str_to_char_code(tag[i..i + 1])
+        if c < 32 || c == 127 is return false end
+        i += 1
+    end
+    return true
+end
+
+;; Wszystkie tagi z manifests/*.json, posortowane.
+pub fn list_tags(root: string) -> [string] is
+    let mut out: [string] = []
+    let dir: string = text::path_join(root, "manifests")
+    if !fs::is_dir(dir) is return out end
+    let files: [string] = fs::list_dir(dir)
+    let n: int = files.len()
+    let mut i: int = 0
+    while i < n is
+        let f: string = files[i]
+        i += 1
+        if text::ends_with(f, ".json") is
+            let fl: int = f.len()
+            let tag: string = f[0..fl - 5]
+            if tag != "" is out.push(tag) end
+        end
+    end
+    return sort_strings(out)
+end
+
+;; Zawartość pliku stanu (CURRENT_TAG / PREVIOUS_TAG) bez białych znaków;
+;; "" gdy brak pliku.
+pub fn read_state(root: string, name: string) -> string is
+    let p: string = text::path_join(root, name)
+    if !fs::exists(p) is return "" end
+    return text::trim(fs::read(p))
+end
+
+pub fn current_tag(root: string) -> string is return read_state(root, "CURRENT_TAG") end
+pub fn previous_tag(root: string) -> string is return read_state(root, "PREVIOUS_TAG") end
+
+;; ── Pins ─────────────────────────────────────────────────────────────────────
+
+pub struct Pin is
+    pub tag:       string
+    pub note:      string
+    pub pinned_at: string
+end
+
+pub struct PinsResult is
+    pub ok:    bool
+    pub error: string
+    pub pins:  [Pin]
+end
+
+pub fn list_pins(root: string) -> PinsResult is
+    let mut out: [Pin] = []
+    let path: string = text::path_join(root, "pins.json")
+    if !fs::exists(path) is return PinsResult { ok: true, error: "", pins: out } end
+    let p: json::Parsed = json::parse(fs::read(path))
+    if !p.ok is return PinsResult { ok: false, error: "pins.json: " + p.error, pins: [] } end
+    let arr: json::J = p.value
+    if arr.kind != 4 is return PinsResult { ok: false, error: "pins.json: oczekiwano tablicy", pins: [] } end
+    let n: int = arr.items.len()
+    let mut i: int = 0
+    while i < n is
+        let e: json::J = arr.items[i]
+        i += 1
+        let t: string = json::as_str(json::get(e, "tag"), "")
+        if t != "" is
+            out.push(Pin { tag: t, note: json::as_str(json::get(e, "note"), ""),
+                pinned_at: json::as_str(json::get(e, "pinnedAt"), "") })
+        end
+    end
+    return PinsResult { ok: true, error: "", pins: out }
+end
+
+pub fn is_pinned(root: string, tag: string) -> bool is
+    let r: PinsResult = list_pins(root)
+    if !r.ok is return false end
+    let n: int = r.pins.len()
+    let mut i: int = 0
+    while i < n is
+        let t: string = r.pins[i].tag
+        if t == tag is return true end
+        i += 1
+    end
+    return false
+end
+
+;; Zdejmuje wszystkie przypięcia taga. value = liczba usuniętych wpisów.
+;; Brak przypięcia nie jest błędem (value "0") — operacja jest idempotentna.
+pub fn unpin(root: string, tag: string) -> RepoResult is
+    let path: string = text::path_join(root, "pins.json")
+    if !fs::exists(path) is return rok("0") end
+    let p: json::Parsed = json::parse(fs::read(path))
+    if !p.ok is return rerr("pins.json: " + p.error) end
+    let arr: json::J = p.value
+    if arr.kind != 4 is return rerr("pins.json: oczekiwano tablicy") end
+    let mut keep: [json::J] = []
+    let mut removed: int = 0
+    let n: int = arr.items.len()
+    let mut i: int = 0
+    while i < n is
+        let e: json::J = arr.items[i]
+        i += 1
+        let t: string = json::as_str(json::get(e, "tag"), "")
+        if t == tag is
+            removed += 1
+        else is
+            keep.push(e)
+        end
+    end
+    if removed > 0 is
+        if !fs::write(path, json::to_pretty(json::jarr(keep))) is
+            return rerr("nie można zapisać " + path)
+        end
+    end
+    return rok(text::istr(removed))
+end
+
+;; ── Rollback ─────────────────────────────────────────────────────────────────
+
+;; Przełącza `current` na poprzednie wdrożenie (PREVIOUS_TAG) i zamienia
+;; CURRENT_TAG <-> PREVIOUS_TAG. Symlink podmieniany atomowo (rename(2)).
+;; value = tag, na który przełączono.
+pub fn rollback(root: string) -> RepoResult is
+    let cur: string = current_tag(root)
+    let prev: string = previous_tag(root)
+    if cur == "" is return rerr("brak CURRENT_TAG — nie ma aktywnego wdrożenia") end
+    if prev == "" is return rerr("brak PREVIOUS_TAG — nie ma do czego wracać") end
+    if !valid_tag(prev) is return rerr("niepoprawny PREVIOUS_TAG: '" + prev + "'") end
+    let image: string = text::path_join(text::path_join(root, "deployments"), prev + ".erofs")
+    if !fs::exists(image) is return rerr("brak obrazu poprzedniego wdrożenia: " + image) end
+    let link: string = text::path_join(root, "current")
+    let tmp: string = link + ".tmp"
+    if sys::exists_any(tmp) is sys::rm_f(tmp) end
+    if !sys::symlink(image, tmp) is return rerr("nie można utworzyć symlinku " + tmp) end
+    fs::rename(tmp, link)
+    if !fs::write(text::path_join(root, "CURRENT_TAG"), prev) is return rerr("nie można zapisać CURRENT_TAG") end
+    if !fs::write(text::path_join(root, "PREVIOUS_TAG"), cur) is return rerr("nie można zapisać PREVIOUS_TAG") end
+    return rok(prev)
+end
+
+;; ── Usuwanie tagu ────────────────────────────────────────────────────────────
+
+;; Usuwa manifest taga i jego artefakty wdrożenia. Odmawia, gdy tag jest
+;; aktywny (CURRENT_TAG) albo przypięty — to samo kryterium "żywości" co w GC.
+;; Chunki zostają w store do najbliższego `fasttree gc`.
+pub fn remove_tag(root: string, tag: string) -> RepoResult is
+    if !valid_tag(tag) is return rerr("niepoprawna nazwa taga: '" + tag + "'") end
+    let mpath: string = manifest::manifest_path_in(root, tag)
+    if !fs::exists(mpath) is return rerr("brak manifestu dla taga '" + tag + "'") end
+    if current_tag(root) == tag is return rerr("tag '" + tag + "' jest aktywny (CURRENT_TAG) — najpierw wdróż inny") end
+    if is_pinned(root, tag) is return rerr("tag '" + tag + "' jest przypięty — najpierw 'fasttree unpin'") end
+    sys::rm_f(mpath)
+    let base: string = text::path_join(text::path_join(root, "deployments"), tag)
+    sys::rm_f(base + ".erofs")
+    sys::rm_f(base + ".erofs.digest")
+    sys::rm_f(base + ".erofs.veritysum")
+    sys::rm_f(base + ".erofs.verity-hashtree")
+    sys::rm_rf(base + ".materialized")
+    if previous_tag(root) == tag is sys::rm_f(text::path_join(root, "PREVIOUS_TAG")) end
+    return rok(tag)
+end
