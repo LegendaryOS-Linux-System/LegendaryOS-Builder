@@ -1,0 +1,324 @@
+mod text
+mod hashing
+mod sys
+mod json
+use "std -> fs" from "fs"
+
+;; Klient rejestru OCI (Docker Registry HTTP API v2).
+;;
+;; Transport: systemowy `curl`. Wbudowany klient HTTP H# 0.9 nie ma TLS,
+;; nagłówków ani ciał binarnych, więc nie nadaje się do rejestrów (ghcr.io,
+;; Docker Hub); curl daje to wszystko, a bloby zapisuje wprost na dysk
+;; (`-o`), bez trzymania warstwy w pamięci.
+
+pub struct ImageRef is
+    pub registry:   string
+    pub repository: string
+    pub reference:  string
+end
+
+pub struct Layer is
+    pub digest:     string
+    pub media_type: string
+    pub size:       int
+end
+
+pub struct ResolvedLayer is
+    pub layer:      Layer
+    pub path:       string
+    pub was_cached: bool
+end
+
+pub struct RefResult is
+    pub ok:    bool
+    pub error: string
+    pub ref:   ImageRef
+end
+
+fn empty_ref() -> ImageRef is
+    return ImageRef { registry: "", repository: "", reference: "" }
+end
+
+;; "ghcr.io/hackeros/system:v2.0" -> registry=ghcr.io, repo=hackeros/system, ref=v2.0
+pub fn parse_image_ref(s: string) -> RefResult is
+    let slash: int = text::find(s, "/")
+    if slash <= 0 is
+        return RefResult { ok: false, error: "oczekiwano <registry>/<repo>[:tag]", ref: empty_ref() }
+    end
+    let n: int = s.len()
+    let registry: string = s[0..slash]
+    let mut rest: string = s[slash + 1..n]
+    let mut reference: string = "latest"
+    let colon: int = text::rfind(rest, ":")
+    let rslash: int = text::rfind(rest, "/")
+    if colon > rslash is
+        let rn: int = rest.len()
+        reference = rest[colon + 1..rn]
+        rest = rest[0..colon]
+    end
+    return RefResult { ok: true, error: "", ref: ImageRef { registry: registry, repository: rest, reference: reference } }
+end
+
+;; `http` tylko dla localhost/127.0.0.1[:port] (konwencja "insecure registry"
+;; z Dockera/containerd); każdy inny host -> https.
+pub fn registry_scheme(registry: string) -> string is
+    let parts: [string] = text::split(registry, ":")
+    let host: string = parts[0]
+    if host == "localhost" || host == "127.0.0.1" is return "http" end
+    return "https"
+end
+
+fn lower(s: string) -> string is
+    let n: int = s.len()
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        let c: string = s[i..i + 1]
+        let code: int = __builtin_str_to_char_code(c)
+        if code >= 65 && code <= 90 is
+            out = out + __builtin_char_code_to_str(code + 32)
+        else is
+            out = out + c
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Wartość pola `key="..."` z nagłówka WWW-Authenticate (lub "").
+pub fn auth_param(header: string, key: string) -> string is
+    let pat: string = key + "=\""
+    let i: int = text::find(header, pat)
+    if i < 0 is return "" end
+    let n: int = header.len()
+    let pl: int = pat.len()
+    let rest: string = header[i + pl..n]
+    let j: int = text::find(rest, "\"")
+    if j < 0 is return "" end
+    return rest[0..j]
+end
+
+fn upper_hex(n: int) -> string is
+    let d: string = "0123456789ABCDEF"
+    return d[n..n + 1]
+end
+
+pub fn url_encode(s: string) -> string is
+    let n: int = s.len()
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < n is
+        let c: string = s[i..i + 1]
+        let code: int = __builtin_str_to_char_code(c)
+        let unreserved: bool = (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code == 45 || code == 95 || code == 46 || code == 126
+        if unreserved is
+            out = out + c
+        else is
+            out = out + "%" + upper_hex(code / 16) + upper_hex(code % 16)
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Wynik jednego żądania GET.
+pub struct Http is
+    pub ok:       bool
+    pub error:    string
+    pub code:     int
+    pub www_auth: string
+    pub token:    string
+end
+
+fn last_www_authenticate(hdr_file: string) -> string is
+    if !fs::exists(hdr_file) is return "" end
+    let lines: [string] = text::lines(fs::read(hdr_file))
+    let n: int = lines.len()
+    let mut found: string = ""
+    let mut i: int = 0
+    while i < n is
+        let l: string = text::trim(lines[i])
+        let ll: string = lower(l)
+        if text::starts_with(ll, "www-authenticate:") is
+            let ln: int = l.len()
+            found = text::trim(l[17..ln])
+        end
+        i += 1
+    end
+    return found
+end
+
+;; Jedno żądanie GET przez curl; body -> `body_path`. `accept` puste = bez
+;; nagłówka Accept. `token` puste = bez Authorization.
+fn curl_get(url: string, body_path: string, token: string, accept: string, max_time: int) -> Http is
+    let hdr: string = body_path + ".hdr"
+    let wfmt: string = "%" + text::lbrace() + "http_code" + text::rbrace()
+    let mut cmd: string = "curl -sS -L --max-time " + text::istr(max_time) + " -o " + sys::sq(body_path) + " -D " + sys::sq(hdr) + " -w " + sys::sq(wfmt)
+    if accept != "" is cmd = cmd + " -H " + sys::sq("Accept: " + accept) end
+    if token != "" is cmd = cmd + " -H " + sys::sq("Authorization: Bearer " + token) end
+    cmd = cmd + " " + sys::sq(url)
+    let r: sys::Exec = sys::exec(cmd)
+    if r.code != 0 is
+        return Http { ok: false, error: "curl: " + text::trim(r.out), code: 0, www_auth: "", token: token }
+    end
+    let o: string = text::trim(r.out)
+    let on: int = o.len()
+    let mut code: int = 0
+    if on >= 3 is code = text::parse_int(o[on - 3..on], 0) end
+    let wa: string = last_www_authenticate(hdr)
+    sys::rm_f(hdr)
+    return Http { ok: true, error: "", code: code, www_auth: wa, token: token }
+end
+
+pub struct TokenResult is
+    pub ok:    bool
+    pub error: string
+    pub token: string
+end
+
+fn fetch_bearer_token(realm: string, service: string, scope: string, tmp: string) -> TokenResult is
+    let mut url: string = realm
+    let mut params: [string] = []
+    if service != "" is params.push("service=" + url_encode(service)) end
+    if scope != "" is params.push("scope=" + url_encode(scope)) end
+    let pn: int = params.len()
+    if pn > 0 is url = url + "?" + text::join(params, "&") end
+    let body: string = tmp + ".token"
+    let h: Http = curl_get(url, body, "", "", 15)
+    if !h.ok || h.code >= 400 || h.code == 0 is
+        sys::rm_f(body)
+        return TokenResult { ok: false, token: "", error: "pobranie tokenu z '" + realm + "' nie powiodło się: " + h.error + " (HTTP " + text::istr(h.code) + ")" }
+    end
+    let raw: string = fs::read(body)
+    sys::rm_f(body)
+    let p: json::Parsed = json::parse(raw)
+    if !p.ok is return TokenResult { ok: false, token: "", error: "odpowiedź serwera tokenów: " + p.error } end
+    if json::has(p.value, "token") is
+        return TokenResult { ok: true, error: "", token: json::as_str(json::get(p.value, "token"), "") }
+    end
+    if json::has(p.value, "access_token") is
+        return TokenResult { ok: true, error: "", token: json::as_str(json::get(p.value, "access_token"), "") }
+    end
+    return TokenResult { ok: false, token: "", error: "odpowiedź serwera tokenów nie zawiera pola 'token' ani 'access_token'" }
+end
+
+pub fn manifest_accept() -> string is
+    return "application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+end
+
+;; GET z automatycznym handshake'em Bearer przy 401. `token` jest przekazywany
+;; JAWNIE tam i z powrotem (wynik w `Http.token`), dzięki czemu kolejne bloby
+;; jednego pulla nie powtarzają handshake'u.
+pub fn request_get(url: string, body_path: string, token: string, max_time: int) -> Http is
+    let first: Http = curl_get(url, body_path, token, manifest_accept(), max_time)
+    if !first.ok || first.code != 401 is return first end
+    let realm: string = auth_param(first.www_auth, "realm")
+    if realm == "" is return first end
+    let service: string = auth_param(first.www_auth, "service")
+    let scope: string = auth_param(first.www_auth, "scope")
+    let tr: TokenResult = fetch_bearer_token(realm, service, scope, body_path)
+    if !tr.ok is
+        return Http { ok: false, error: tr.error, code: 401, www_auth: first.www_auth, token: token }
+    end
+    return curl_get(url, body_path, tr.token, "", max_time)
+end
+
+;; Pobiera token po pierwszym udanym handshake'u: zwraca go ponownie, by
+;; wywołujący mógł go przekazać dalej. (Przy re-auth curl_get zwraca token
+;; użyty w drugim żądaniu.)
+pub struct ManifestResult is
+    pub ok:       bool
+    pub error:    string
+    pub manifest: json::J
+    pub token:    string
+end
+
+pub fn fetch_manifest(r: ImageRef, token: string, tmp_dir: string) -> ManifestResult is
+    let url: string = registry_scheme(r.registry) + "://" + r.registry + "/v2/" + r.repository + "/manifests/" + r.reference
+    fs::mkdir(tmp_dir)
+    let body: string = text::path_join(tmp_dir, "manifest-" + text::istr(sys::pid()) + ".json")
+    let h: Http = request_get(url, body, token, 30)
+    if !h.ok is return ManifestResult { ok: false, error: h.error, manifest: json::jnull(), token: token } end
+    let txt: string = if fs::exists(body) then fs::read(body) else ""
+    sys::rm_f(body)
+    if h.code >= 400 || h.code == 0 is
+        let tn: int = txt.len()
+        let mut cut: int = 200
+        if tn < cut is cut = tn end
+        return ManifestResult { ok: false, manifest: json::jnull(), token: h.token,
+            error: "GET " + url + " zwróciło " + text::istr(h.code) + " — " + txt[0..cut] }
+    end
+    let p: json::Parsed = json::parse(txt)
+    if !p.ok is return ManifestResult { ok: false, error: "manifest OCI: " + p.error, manifest: json::jnull(), token: h.token } end
+    return ManifestResult { ok: true, error: "", manifest: p.value, token: h.token }
+end
+
+pub struct LayersResult is
+    pub ok:     bool
+    pub error:  string
+    pub layers: [Layer]
+end
+
+pub fn layers_from_manifest(m: json::J) -> LayersResult is
+    let ls: json::J = json::get(m, "layers")
+    if ls.kind != 4 is
+        return LayersResult { ok: false, layers: [],
+            error: "manifest nie zawiera tablicy 'layers' (czy to manifest index/multi-arch? podaj digest konkretnej platformy)" }
+    end
+    let mut out: [Layer] = []
+    let n: int = ls.items.len()
+    let mut i: int = 0
+    while i < n is
+        let l: json::J = ls.items[i]
+        out.push(Layer { digest: json::as_str(json::get(l, "digest"), ""),
+            media_type: json::as_str(json::get(l, "mediaType"), ""),
+            size: json::as_int(json::get(l, "size"), 0) })
+        i += 1
+    end
+    return LayersResult { ok: true, error: "", layers: out }
+end
+
+pub fn digest_to_filename(digest: string) -> string is
+    return text::join(text::split(digest, ":"), "_")
+end
+
+pub struct ResolveResult is
+    pub ok:     bool
+    pub error:  string
+    pub layers: [ResolvedLayer]
+end
+
+;; Wszystkie warstwy obrazu w kolejności z manifestu (dół -> góra). Warstwy
+;; już obecne w `cache_dir` nie są pobierane ponownie.
+pub fn resolve_image_layers(r: ImageRef, cache_dir: string) -> ResolveResult is
+    fs::mkdir(cache_dir)
+    let mr: ManifestResult = fetch_manifest(r, "", cache_dir)
+    if !mr.ok is return ResolveResult { ok: false, error: mr.error, layers: [] } end
+    let lr: LayersResult = layers_from_manifest(mr.manifest)
+    if !lr.ok is return ResolveResult { ok: false, error: lr.error, layers: [] } end
+    let mut token: string = mr.token
+    let mut out: [ResolvedLayer] = []
+    let n: int = lr.layers.len()
+    let mut i: int = 0
+    while i < n is
+        let layer: Layer = lr.layers[i]
+        i += 1
+        let dest: string = text::path_join(cache_dir, digest_to_filename(layer.digest))
+        let cached: bool = fs::exists(dest)
+        if !cached is
+            let url: string = registry_scheme(r.registry) + "://" + r.registry + "/v2/" + r.repository + "/blobs/" + layer.digest
+            let part: string = dest + ".part"
+            let h: Http = request_get(url, part, token, 3600)
+            if !h.ok is return ResolveResult { ok: false, error: h.error, layers: [] } end
+            token = h.token
+            if h.code >= 400 || h.code == 0 is
+                sys::rm_f(part)
+                return ResolveResult { ok: false, layers: [],
+                    error: "GET " + url + " (blob " + layer.digest + ") zwróciło " + text::istr(h.code) }
+            end
+            fs::rename(part, dest)
+        end
+        out.push(ResolvedLayer { layer: layer, path: dest, was_cached: cached })
+    end
+    return ResolveResult { ok: true, error: "", layers: out }
+end
