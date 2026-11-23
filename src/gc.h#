@@ -1,0 +1,121 @@
+mod text
+mod store
+mod manifest
+mod json
+mod sys
+use "std -> fs" from "fs"
+use "std -> collections" from "col"
+
+;; Mark-and-sweep GC dla CAS. "Żywe" tagi: CURRENT_TAG + wszystkie z pins.json.
+
+pub struct GcResult is
+    pub ok:              bool
+    pub error:           string
+    pub scanned_objects: int
+    pub live_objects:    int
+    pub deleted_objects: int
+    pub freed_bytes:     int
+end
+
+fn gc_fail(msg: string) -> GcResult is
+    return GcResult { ok: false, error: msg, scanned_objects: 0, live_objects: 0, deleted_objects: 0, freed_bytes: 0 }
+end
+
+pub struct TagsResult is
+    pub ok:    bool
+    pub error: string
+    pub tags:  [string]
+end
+
+;; Tagi, których manifesty NIE mogą zostać zebrane przez GC.
+pub fn live_tags(root: string) -> TagsResult is
+    let mut out: [string] = []
+    let cur: string = text::path_join(root, "CURRENT_TAG")
+    if fs::exists(cur) is
+        let t: string = text::trim(fs::read(cur))
+        if t != "" is out.push(t) end
+    end
+    let pins: string = text::path_join(root, "pins.json")
+    if fs::exists(pins) is
+        let p: json::Parsed = json::parse(fs::read(pins))
+        if !p.ok is
+            return TagsResult { ok: false, error: "pins.json: " + p.error, tags: [] }
+        end
+        let arr: json::J = p.value
+        let n: int = arr.items.len()
+        let mut i: int = 0
+        while i < n is
+            let t2: string = json::as_str(json::get(arr.items[i], "tag"), "")
+            let mut present: bool = false
+            for x in out is
+                if x == t2 is present = true end
+            end
+            if t2 != "" && !present is out.push(t2) end
+            i += 1
+        end
+    end
+    return TagsResult { ok: true, error: "", tags: out }
+end
+
+pub struct LiveResult is
+    pub ok:     bool
+    pub error:  string
+    pub hashes: [string]
+    pub set:    any
+end
+
+;; Brak manifestu dla żywego tagu jest CELOWO błędem krytycznym — inaczej GC
+;; mógłby skasować dane wciąż używane przez deployment.
+pub fn live_chunk_hashes(root: string) -> LiveResult is
+    let tr: TagsResult = live_tags(root)
+    let mut set = col::hashmap_new()
+    let mut hashes: [string] = []
+    if !tr.ok is return LiveResult { ok: false, error: tr.error, hashes: [], set: set } end
+    let nt: int = tr.tags.len()
+    let mut i: int = 0
+    while i < nt is
+        let tag: string = tr.tags[i]
+        i += 1
+        let mpath: string = text::path_join(text::path_join(root, "manifests"), tag + ".json")
+        if !fs::exists(mpath) is
+            return LiveResult { ok: false, hashes: [], set: set,
+                error: "GC: brak manifestu dla żywego tagu '" + tag + "' (" + mpath + "). Przerywam GC — nie mogę bezpiecznie policzyć live-setu." }
+        end
+        let pr: manifest::ParseResult = manifest::load(mpath)
+        if !pr.ok is return LiveResult { ok: false, error: pr.error, hashes: [], set: set } end
+        for e in pr.manifest.entries is
+            for c in e.chunks is
+                if !col::hashmap_contains(set, c) is
+                    set = col::hashmap_insert(set, c, "1")
+                    hashes.push(c)
+                end
+            end
+        end
+    end
+    return LiveResult { ok: true, error: "", hashes: hashes, set: set }
+end
+
+pub fn run_gc(root: string, dry_run: bool) -> GcResult is
+    let o: store::OpenResult = store::open(text::path_join(root, "store"))
+    if !o.ok is return gc_fail(o.error) end
+    let lv: LiveResult = live_chunk_hashes(root)
+    if !lv.ok is return gc_fail(lv.error) end
+    let all: [string] = store::list_all(o.store)
+    let n: int = all.len()
+    let live_n: int = lv.hashes.len()
+    let mut deleted: int = 0
+    let mut freed: int = 0
+    let mut i: int = 0
+    while i < n is
+        let h: string = all[i]
+        i += 1
+        if !col::hashmap_contains(lv.set, h) is
+            freed += store::object_size(o.store, h)
+            if !dry_run is
+                let d: bool = store::delete_object(o.store, h)
+            end
+            deleted += 1
+        end
+    end
+    return GcResult { ok: true, error: "", scanned_objects: n, live_objects: live_n, deleted_objects: deleted, freed_bytes: freed }
+end
