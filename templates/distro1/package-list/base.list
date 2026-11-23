@@ -1,0 +1,33 @@
+filesystem
+glibc
+glibc-minimal-langpack
+bash
+coreutils
+util-linux
+findutils
+grep
+sed
+gawk
+tar
+gzip
+xz
+zstd
+shadow-utils
+sudo
+passwd
+kernel
+kernel-modules
+kernel-modules-extra
+linux-firmware
+dracut
+dracut-live
+dracut-network
+# udev: Fedora ma tylko systemd-udev. Działa jako samodzielny demon pod zenitd (udevd.service);
+# sam systemd (PID 1) nie jest uruchamiany. Docelowo: eudev w Copr LegendaryOS (docs/ROADMAP.md).
+systemd-udev
+dbus-daemon
+polkit
+NetworkManager
+iproute
+iputils
+openssh-clients
