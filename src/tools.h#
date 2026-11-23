@@ -1,0 +1,238 @@
+mod text
+mod sys
+mod layout
+mod lmanifest
+use "std -> fs" from "fs"
+
+;; ── /tools: narzędzia HackerOS i Zenit Linux jako squashfs ──────────────────
+;;
+;;   /tools/<nazwa>/<rev12>.sqfs   skompresowany obraz (zstd) repozytorium git
+;;   /tools/<nazwa>/current        symlink do aktualnego .sqfs (atomowy)
+;;   /tools/<nazwa>/mnt/           punkt montowania (tylko do odczytu)
+;;   /tools/<nazwa>/tool.toml      git, rev, commit, wpis (entry), rozmiar
+;;   /tools/.tmp/                  katalog roboczy (klon, budowa)
+;;
+;; Repo jest klonowane (płytko), opcjonalnie budowane (`build`), pozbawiane .git
+;; i pakowane do squashfs. Uruchomienie narzędzia = jednorazowy mount obrazu
+;; (loop, ro) — NIC nie jest rozpakowywane do plików, a bloki są dekompresowane
+;; leniwie przez jądro. Montowaniem wszystkich narzędzi przy starcie zajmuje
+;; się usługa zenitd `legendary-tools.service` (`lpm tools mount-all`).
+
+pub struct ToolSpec is
+    pub name:  string
+    pub git:   string   ;; URL (lub ścieżka) repozytorium
+    pub rev:   string   ;; gałąź/tag; "" = domyślna gałąź
+    pub entry: string   ;; ścieżka pliku wykonywalnego wewnątrz obrazu (np. "bin/hacker")
+    pub build: string   ;; opcjonalne polecenie budowy w katalogu repo ("" = brak)
+end
+
+pub struct ToolResult is
+    pub ok:     bool
+    pub error:  string
+    pub name:   string
+    pub commit: string
+    pub sqfs:   string
+    pub size:   int
+end
+
+fn tr_fail(msg: string) -> ToolResult is
+    return ToolResult { ok: false, error: msg, name: "", commit: "", sqfs: "", size: 0 }
+end
+
+pub fn tool_dir(l: layout::Layout, name: string) -> string is
+    return text::path_join(l.tools, name)
+end
+
+pub fn mount_point(l: layout::Layout, name: string) -> string is
+    return text::path_join(tool_dir(l, name), "mnt")
+end
+
+pub fn current_sqfs(l: layout::Layout, name: string) -> string is
+    return text::path_join(tool_dir(l, name), "current")
+end
+
+fn valid_name(s: string) -> bool is
+    let n: int = s.len()
+    if n == 0 || n > 64 is return false end
+    if text::contains(s, "/") || text::contains(s, "..") || text::contains(s, " ") is return false end
+    return !text::starts_with(s, ".") && !text::starts_with(s, "-")
+end
+
+fn valid_entry(s: string) -> bool is
+    if s == "" is return true end
+    return !text::starts_with(s, "/") && !text::contains(s, "..")
+end
+
+;; Wymagane narzędzia do pakowania ("" gdy są).
+pub fn missing_pack_tools() -> string is
+    if !sys::have_tool("git") is return "git" end
+    if !sys::have_tool("mksquashfs") is return "mksquashfs (pakiet squashfs-tools)" end
+    return ""
+end
+
+;; Klonuje, buduje (opcjonalnie), pakuje do squashfs, przełącza `current` atomowo.
+;; Idempotentne: ten sam commit => istniejący obraz jest użyty ponownie.
+pub fn pack(l: layout::Layout, spec: ToolSpec) -> ToolResult is
+    if !valid_name(spec.name) is return tr_fail("niepoprawna nazwa narzędzia: '" + spec.name + "'") end
+    if !valid_entry(spec.entry) is return tr_fail("entry musi być ścieżką względną bez '..': " + spec.entry) end
+    let miss: string = missing_pack_tools()
+    if miss != "" is return tr_fail("brak narzędzia: " + miss) end
+    let work: string = text::path_join(text::path_join(l.tools, ".tmp"), spec.name + "." + text::istr(sys::pid()))
+    sys::rm_rf(work)
+    sys::mkdir_p(work)
+    let src: string = text::path_join(work, "src")
+    let mut cmd: string = "git clone --quiet --depth 1 "
+    if spec.rev != "" is cmd = cmd + "--branch " + sys::sq(spec.rev) + " " end
+    let c: sys::Exec = sys::exec(cmd + sys::sq(spec.git) + " " + sys::sq(src))
+    if c.code != 0 is
+        sys::rm_rf(work)
+        return tr_fail("git clone nie powiódł się: " + text::trim(c.out))
+    end
+    let h: sys::Exec = sys::exec("git -C " + sys::sq(src) + " rev-parse HEAD")
+    let commit: string = text::trim(h.out)
+    if h.code != 0 || commit.len() < 12 is
+        sys::rm_rf(work)
+        return tr_fail("nie można ustalić commita: " + text::trim(h.out))
+    end
+    let short: string = commit[0..12]
+    let tdir: string = tool_dir(l, spec.name)
+    sys::mkdir_p(tdir)
+    let final: string = text::path_join(tdir, short + ".sqfs")
+    if fs::exists(final) is
+        sys::rm_rf(work)
+        let sw: bool = switch(l, spec.name, short + ".sqfs")
+        return ToolResult { ok: true, error: "", name: spec.name, commit: commit, sqfs: final, size: fs::size(final) }
+    end
+    if spec.build != "" is
+        let b: sys::Exec = sys::exec("cd " + sys::sq(src) + " && " + spec.build)
+        if b.code != 0 is
+            sys::rm_rf(work)
+            return tr_fail("budowa nie powiodła się (" + spec.build + "): " + text::trim(b.out))
+        end
+    end
+    sys::rm_rf(text::path_join(src, ".git"))
+    let img: string = text::path_join(work, "image.sqfs")
+    let mut m: sys::Exec = sys::exec("mksquashfs " + sys::sq(src) + " " + sys::sq(img) + " -noappend -quiet -no-progress -comp zstd -Xcompression-level 19 -b 131072")
+    if m.code != 0 is
+        ;; starsze squashfs-tools bez zstd — xz
+        m = sys::exec("mksquashfs " + sys::sq(src) + " " + sys::sq(img) + " -noappend -quiet -no-progress -comp xz -b 131072")
+    end
+    if m.code != 0 is
+        sys::rm_rf(work)
+        return tr_fail("mksquashfs nie powiodło się: " + text::trim(m.out))
+    end
+    let size: int = fs::size(img)
+    fs::rename(img, final)
+    sys::rm_rf(work)
+    if !fs::exists(final) is return tr_fail("nie można zapisać " + final) end
+    let mut d: lmanifest::Doc = lmanifest::empty()
+    d = lmanifest::put_str(d, "tool", "name", spec.name)
+    d = lmanifest::put_str(d, "tool", "git", spec.git)
+    d = lmanifest::put_str(d, "tool", "rev", spec.rev)
+    d = lmanifest::put_str(d, "tool", "commit", commit)
+    d = lmanifest::put_str(d, "tool", "entry", spec.entry)
+    d = lmanifest::put_str(d, "tool", "sqfs", short + ".sqfs")
+    d = lmanifest::put_int(d, "tool", "size", size)
+    let se: string = lmanifest::save(text::path_join(tdir, "tool.toml"), d)
+    if se != "" is return tr_fail(se) end
+    if !switch(l, spec.name, short + ".sqfs") is return tr_fail("nie można przełączyć " + current_sqfs(l, spec.name)) end
+    return ToolResult { ok: true, error: "", name: spec.name, commit: commit, sqfs: final, size: size }
+end
+
+fn switch(l: layout::Layout, name: string, file: string) -> bool is
+    let link: string = current_sqfs(l, name)
+    let tmp: string = link + ".new." + text::istr(sys::pid())
+    if !sys::ok("ln -sfn -- " + sys::sq(file) + " " + sys::sq(tmp)) is return false end
+    if !sys::ok("mv -T -- " + sys::sq(tmp) + " " + sys::sq(link)) is
+        sys::rm_f(tmp)
+        return false
+    end
+    return true
+end
+
+pub fn list(l: layout::Layout) -> [string] is
+    let mut out: [string] = []
+    if !fs::is_dir(l.tools) is return out end
+    let files: [string] = fs::list_dir(l.tools)
+    let mut i: int = 0
+    while i < files.len() is
+        let n: string = files[i]
+        i += 1
+        if valid_name(n) && fs::exists(text::path_join(tool_dir(l, n), "tool.toml")) is out.push(n) end
+    end
+    return out
+end
+
+pub fn info(l: layout::Layout, name: string) -> lmanifest::ParseResult is
+    return lmanifest::load(text::path_join(tool_dir(l, name), "tool.toml"))
+end
+
+pub fn is_mounted(l: layout::Layout, name: string) -> bool is
+    return sys::ok("mountpoint -q " + sys::sq(mount_point(l, name)))
+end
+
+;; Montuje aktualny obraz (ro). Root: mount -t squashfs -o loop; inaczej squashfuse.
+;; Zwraca "" gdy OK. Idempotentne.
+pub fn mount_tool(l: layout::Layout, name: string) -> string is
+    if !valid_name(name) is return "niepoprawna nazwa: " + name end
+    let img: string = current_sqfs(l, name)
+    if !fs::exists(img) is return "narzędzie '" + name + "' nie jest zainstalowane (brak " + img + ")" end
+    if is_mounted(l, name) is return "" end
+    let mp: string = mount_point(l, name)
+    sys::mkdir_p(mp)
+    let r: sys::Exec = sys::exec("mount -t squashfs -o ro,loop " + sys::sq(img) + " " + sys::sq(mp))
+    if r.code == 0 is return "" end
+    if sys::have_tool("squashfuse") is
+        let f: sys::Exec = sys::exec("squashfuse -o ro " + sys::sq(img) + " " + sys::sq(mp))
+        if f.code == 0 is return "" end
+        return "squashfuse: " + text::trim(f.out)
+    end
+    return "mount: " + text::trim(r.out)
+end
+
+pub fn umount_tool(l: layout::Layout, name: string) -> string is
+    if !is_mounted(l, name) is return "" end
+    let r: sys::Exec = sys::exec("umount " + sys::sq(mount_point(l, name)))
+    if r.code != 0 is return text::trim(r.out) end
+    return ""
+end
+
+;; Pełna ścieżka pliku wykonywalnego (po zamontowaniu) albo "".
+pub fn entry_path(l: layout::Layout, name: string) -> string is
+    let m: lmanifest::ParseResult = info(l, name)
+    if !m.ok is return "" end
+    let e: string = lmanifest::get(m.doc, "tool", "entry", "")
+    if e == "" is return "" end
+    return text::path_join(mount_point(l, name), e)
+end
+
+;; Usuwa narzędzie (odmontowuje, kasuje katalog). Zwraca "" gdy OK.
+pub fn remove(l: layout::Layout, name: string) -> string is
+    if !valid_name(name) is return "niepoprawna nazwa: " + name end
+    if !fs::is_dir(tool_dir(l, name)) is return "narzędzie '" + name + "' nie istnieje" end
+    let u: string = umount_tool(l, name)
+    if u != "" is return "nie można odmontować: " + u end
+    sys::rm_rf(tool_dir(l, name))
+    return ""
+end
+
+;; Usuwa stare obrazy poza aktualnym; zwraca liczbę usuniętych.
+pub fn prune_old(l: layout::Layout, name: string) -> int is
+    let cur: string = text::basename(sys::readlink(current_sqfs(l, name)))
+    let files: [string] = fs::list_dir(tool_dir(l, name))
+    let mut removed: int = 0
+    let mut i: int = 0
+    while i < files.len() is
+        let f: string = files[i]
+        i += 1
+        if text::ends_with(f, ".sqfs") && f != cur is
+            sys::rm_f(text::path_join(tool_dir(l, name), f))
+            removed += 1
+        end
+    end
+    return removed
+end
+
+pub fn new_spec(name: string, git: string, rev: string, entry: string, build: string) -> ToolSpec is
+    return ToolSpec { name: name, git: git, rev: rev, entry: entry, build: build }
+end
