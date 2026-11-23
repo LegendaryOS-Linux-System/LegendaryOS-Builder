@@ -1,0 +1,5 @@
+using <gen 2026>
+;; Szkic workflowu CI w Hacker Lang++ (STATUS: niezweryfikowany — brak `hlpp` w środowisku autora).
+~> LegendaryOS CI: walidacja i plan budowy
+^> legendaryos-builder validate ../LegendaryOS
+^> legendaryos-builder plan ../LegendaryOS --target both
