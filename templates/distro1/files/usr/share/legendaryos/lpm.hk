@@ -1,0 +1,9 @@
+[lpm]
+-> backend          => dnf
+-> releasever       => 43
+-> base-image       => ghcr.io/legendaryos/legendaryos:latest
+-> keep-generations => 3
+-> dnf              => dnf5
+
+[tools]
+-> catalog => /system/share/legendaryos/tools.hk
