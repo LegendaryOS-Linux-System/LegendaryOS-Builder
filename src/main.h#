@@ -1,0 +1,112 @@
+use "bit -> colors"
+use "bit -> nidus" from "nidus"
+use "bit -> progress-bar" from "pb"
+use "std -> env" from "env"
+mod text
+mod sys
+mod ui
+mod proj
+mod build
+mod scaffold
+
+fn usage() -> string is
+    return "legendaryos-builder 0.1.0 — builder obrazów ISO i OCI dla LegendaryOS\n\n  new <katalog>                nowy projekt dystrybucji (szablon + branding zastępczy)\n  validate [katalog]           sprawdź config.hk, user.hk, branding, listy pakietów\n  doctor                       sprawdź narzędzia potrzebne do budowy\n  plan [katalog]               pokaż kroki i polecenia (dry-run)\n  build [katalog]              zbuduj ISO i/albo OCI (root)\n  steps                        lista kroków\n\nOpcje build/plan: --target iso|oci|both  --only KROK  --strict  --dry-run\nSkrypty/CI: NO_COLOR=1; token w user.hk jako env:NAZWA (nigdy nie jest drukowany)"
+end
+
+fn doctor() -> int is
+    ui::head("doctor")
+    let need: [string] = ["git", "curl", "dnf5", "chroot", "mksquashfs", "grub2-mkrescue", "xorriso", "podman", "fasttree", "tar", "z#", "hl"]
+    let mut bad: int = 0
+    let mut i: int = 0
+    while i < need.len() is
+        if sys::have_tool(need[i]) is ui::ok(need[i]) else is
+            ui::warn("brak: " + need[i])
+            bad += 1
+        end
+        i += 1
+    end
+    if bad > 0 is ui::info("`z#`/`hl` są opcjonalne (ZENITD_BIN, brak hooków .hl); `podman` tylko dla OCI; grub2/xorriso tylko dla ISO") end
+    return 0
+end
+
+fn main() -> int is
+    let argv: [string] = env::args()
+    let mut args: [string] = []
+    let mut dry: bool = false
+    let mut strict: bool = false
+    let mut target: string = ""
+    let mut only: string = ""
+    let mut i: int = 1
+    while i < argv.len() is
+        let a: string = argv[i]
+        i += 1
+        if a == "--dry-run" is dry = true
+        else is
+            if a == "--strict" is strict = true
+            else is
+                if a == "--target" && i < argv.len() is
+                    target = argv[i]
+                    i += 1
+                else is
+                    if a == "--only" && i < argv.len() is
+                        only = argv[i]
+                        i += 1
+                    else is args.push(a) end
+                end
+            end
+        end
+    end
+    if args.len() == 0 || args[0] == "help" || args[0] == "--help" is
+        write(usage())
+        return 0
+    end
+    let cmd: string = args[0]
+    let mut dir: string = "."
+    if args.len() > 1 is dir = args[1] end
+    if cmd == "version" is
+        write("legendaryos-builder 0.1.0")
+        return 0
+    end
+    if cmd == "steps" is
+        let names: [string] = build::step_names(proj::empty_for_steps())
+        write(text::join(names, "\n"))
+        return 0
+    end
+    if cmd == "doctor" is return doctor() end
+    if cmd == "new" is
+        if args.len() < 2 is
+            ui::err("legendaryos-builder new <katalog>")
+            return 1
+        end
+        let e: string = scaffold::create(args[1])
+        if e != "" is
+            ui::err(e)
+            return 1
+        end
+        ui::ok("projekt utworzony w " + args[1] + " — podmień pliki w branding/, uzupełnij user.hk")
+        return 0
+    end
+    if cmd == "validate" || cmd == "plan" || cmd == "build" is
+        let lr: proj::LoadResult = proj::load(dir)
+        if !lr.ok is return 1 end
+        let mut p: proj::Project = lr.project
+        if target == "iso" is p = proj::with_formats(p, ["iso"]) end
+        if target == "oci" is p = proj::with_formats(p, ["oci"]) end
+        if target == "both" is p = proj::with_formats(p, ["iso", "oci"]) end
+        let probs: [string] = proj::validate(p)
+        let mut k: int = 0
+        while k < probs.len() is
+            ui::err(probs[k])
+            k += 1
+        end
+        if probs.len() > 0 is return 1 end
+        if cmd == "validate" is
+            ui::ok(p.name + " " + p.version + " (" + p.arch + ", Fedora " + p.base_release + ") — projekt poprawny")
+            return 0
+        end
+        let c: build::Ctx = build::new_ctx(p, dry || cmd == "plan", strict)
+        return build::run(c, only)
+    end
+    ui::err("nieznana komenda: " + cmd)
+    return 1
+end
