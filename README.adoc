@@ -3,7 +3,8 @@
 Builder obrazów **ISO** (live) i **OCI** dla LegendaryOS. Zastępuje poprzednią wersję (nakładka na live-build/bootc —
 patrz `docs/legacy/`): teraz buduje dystrybucję opartą na **Fedorze**, z init-em **zenitd**, układem
 `/system /state /packages /tools` i obrazem systemu w **FastTree**. H# + biblioteki bit.io (`colors`, `nidus`,
-`progress-bar`) + libfasttree.
+`progress-bar`) + **libfasttree jako biblioteka** (`use "bit -> libfasttree" from "ft"`; bez kopii źródeł, bez programu `fasttree`).
+Pakiety do rootfs składa **lepm** (satsolv) — builder **nie używa dnf**.
 
 ```
 legendaryos-builder new <katalog>     szablon dystrybucji (config.hk, user.hk, branding/, files/, package-list/, scripts/)
@@ -14,28 +15,28 @@ legendaryos-builder doctor | steps | version
 ```
 
 ## Kroki (`build.h#`)
-`prepare → packages → zenitd → overlay → hooks → layout → identity → tools → fasttree → iso|oci → checksums`
+`prepare → packages → zenitd → lpm → overlay → hooks → layout → identity → tools → fasttree → iso|oci → checksums`
 
-1. **packages** — `dnf5 install --installroot` z `package-list/*.list` (nazwy walidowane — brak wstrzyknięcia do powłoki).
+1. **packages** — `lepm bootstrap` (rpm-md → satsolv → pobranie → rozpakowanie → sysusers → hooki) z `package-list/*.list`, `repos.hk`, `compat.hk` (nazwy walidowane). Zob. `../lepm`, `../lrpm/docs/POLICY.md`.
 2. **zenitd** — klon repo + pobranie `install.sh` z adresu w `config.hk` + `DESTDIR=<rootfs> PREFIX=/usr bash install.sh`.
    Skrypt buduje zenitd kompilatorem `z#`; bez niego podaj gotową binarkę: `ZENITD_BIN=/ścieżka/zenitd` (→ `--no-build`).
-3. **overlay** — `files/` (jak „after packages”) + branding → `/usr/share/legendaryos/branding`.
+3. **overlay** — `files/` (jak „after packages”) + branding + `repos.hk`/`compat.hk` (dla lpm w systemie). Krok **lpm** wcześniej wgrywa binarkę z `LPM_BIN`.
 4. **hooks** — `scripts/*.sh` w chroocie, `scripts/*.hl` przez `hl` (brak `hl` = ostrzeżenie, `--strict` = błąd).
 5. **layout** — `usr→system`, `etc|var|root|srv→state`, `packages/ tools/ home/`, symlinki zgodności (`usr→system`…).
 6. **identity** — `os-release`, `hostname`, `manifest.toml` (walidowany: `init.service_manager` musi być `zenitd`).
-7. **tools** — katalog `tools.hk`: git → squashfs w `/tools` (libfasttree `tools::pack`).
-8. **fasttree** — `fasttree snapshot` całego rootfs + rejestracja wdrożenia bazowego.
+7. **tools** — katalog `tools.hk`: git → squashfs w `/tools` (`ft::api::tool_pack`).
+8. **fasttree** — `ft::api::snapshot` całego rootfs + `ft::api::register_base` (biblioteka, nie CLI).
 9. **iso** — squashfs + kernel/initramfs + `grub2-mkrescue` (BIOS+UEFI); **oci** — `podman import` → `oci-archive`.
 
-Budowa wymaga **roota** (chroot, dnf --installroot): uruchamiaj w VM/kontenerze `--privileged` (patrz `.github/workflows/build.yml`).
+Budowa wymaga **roota** (chroot, mount, rozpakowanie z właścicielami): uruchamiaj w VM/kontenerze `--privileged` (patrz `.github/workflows/build.yml`).
 Token (user.hk) jako `env:NAZWA` — nigdy nie jest drukowany.
 
 ## Budowanie samego buildera
 ```
 bit build && cache/build/debug/legendaryos-builder validate ../LegendaryOS
-scripts/vendor-fasttree.sh    # po zmianach w ../libfasttree
 ```
 ## Status
 Zweryfikowane: kompilacja, `new/validate/plan`, kroki `layout`, `identity`, `fasttree` na sztucznym rootfs.
-**Niezweryfikowane** (brak Fedory/dnf5/podmana/grub w środowisku autora): `packages`, `zenitd`, `hooks`, `iso`, `oci`.
+**Uwaga 0.2.0:** przejście na `ft::api::*` i `lepm` zostało napisane bez kompilatora H# — `proj.h#`, `build.h#`, `main.h#` są zmienione; zacznij od `bit build`.
+**Niezweryfikowane** (brak Fedory/podmana/grub): `packages` (lepm), `zenitd`, `hooks`, `iso`, `oci`.
 Zob. `docs/BUILDING.md`.
