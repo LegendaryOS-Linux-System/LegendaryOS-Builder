@@ -1,6 +1,6 @@
 [package]
 -> name        => legendaryos-builder
--> version     => 0.1.0
+-> version     => 0.2.0
 -> description => Builder obrazów ISO i OCI dla LegendaryOS (Fedora + zenitd + FastTree)
 -> authors     => ["LegendaryOS Team"]
 -> license     => MIT
@@ -13,6 +13,7 @@
 -> src => src
 
 [dependencies]
+-> libfasttree => newest
 -> colors => newest
 -> nidus => newest
 -> progress-bar => newest
