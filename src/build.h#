@@ -1,0 +1,383 @@
+use "std -> fs" from "fs"
+mod ui
+mod proj
+
+;; Pipeline budowy LegendaryOS (Fedora RPM -> układ /system /state /packages /tools -> FastTree -> OCI/ISO).
+;;
+;; BEZ dnf: rootfs składa `lepm` (rpm-md -> satsolv -> pobranie -> rozpakowanie; cały silnik w bibliotece lrpm).
+;; FastTree, układ, manifest, /tools — WYŁĄCZNIE jako biblioteka: ft::api::* (use "bit -> libfasttree" w main.h#).
+;; Builder nie woła programu `fasttree` i nie zawiera kopii źródeł libfasttree.
+;; Każdy krok zwraca "" (OK) albo komunikat błędu. W trybie --dry-run polecenia są tylko drukowane.
+
+pub struct Ctx is
+    pub p:       proj::Project
+    pub work:    string
+    pub rootfs:  string
+    pub out:     string
+    pub dry:     bool
+    pub strict:  bool
+    pub tag:     string
+end
+
+pub fn new_ctx(p: proj::Project, dry: bool, strict: bool) -> Ctx is
+    let b: string = ft::text::path_join(p.dir, "build")
+    return Ctx { p: p, work: ft::text::path_join(b, "work"), rootfs: ft::text::path_join(b, "rootfs"),
+        out: ft::text::path_join(b, "out"), dry: dry, strict: strict, tag: p.id + "-" + p.version }
+end
+
+;; Uruchamia polecenie (lub je drukuje w dry-run). Zwraca "" albo błąd z końcówką wyjścia.
+fn sh(c: Ctx, cmd: string) -> string is
+    if c.dry is
+        write("    $ " + cmd)
+        return ""
+    end
+    let r: sys::Exec = ft::sys::exec(cmd)
+    if r.code != 0 is
+        let o: string = ft::text::trim(r.out)
+        let n: int = o.len()
+        let mut tail: string = o
+        if n > 1500 is tail = "..." + o[n - 1500..n] end
+        return "polecenie zakończone kodem " + ft::text::istr(r.code) + ": " + cmd + "\n" + tail
+    end
+    return ""
+end
+
+fn mkdirs(c: Ctx, path: string) is
+    if !c.dry is ft::sys::mkdir_p(path) end
+end
+
+;; ── Kroki ────────────────────────────────────────────────────────────────────
+
+pub fn step_prepare(c: Ctx) -> string is
+    if !c.dry && !ft::sys::ok("test \"$(id -u)\" = 0") is
+        return "budowa wymaga roota (chroot, mount, rozpakowanie z zachowaniem właścicieli). Uruchom przez sudo albo w kontenerze --privileged"
+    end
+    if !c.dry is
+        ft::sys::rm_rf(c.rootfs)
+        ft::sys::rm_rf(c.work)
+    end
+    mkdirs(c, c.rootfs)
+    mkdirs(c, c.work)
+    mkdirs(c, c.out)
+    return ""
+end
+
+;; Rootfs z RPM-ów: `lepm bootstrap` (satsolv + compat.hk; zob. ../lepm/README.md, ../lrpm/docs/POLICY.md).
+;; Cache metadanych i RPM-ów (build/cache) przeżywa kolejne budowy — `prepare` go nie czyści.
+pub fn step_packages(c: Ctx) -> string is
+    let pk: [string] = proj::packages(c.p)
+    if pk.len() == 0 is return "package-list/ jest pusta" end
+    let mut k: int = 0
+    while k < pk.len() is
+        if !proj::safe_pkg(pk[k]) is return "niepoprawna nazwa pakietu w package-list/: '" + pk[k] + "'" end
+        k += 1
+    end
+    ui::info("pakietów z list: " + ft::text::istr(pk.len()) + " (menedżer: " + c.p.lepm + ", bez dnf)")
+    if !c.dry && !ft::sys::have_tool(c.p.lepm) is
+        return "brak narzędzia '" + c.p.lepm + "' (lepm) — zbuduj ../lepm (bit build) i dodaj do PATH albo ustaw packages.manager w config.hk"
+    end
+    let cache: string = ft::text::path_join(ft::text::path_join(c.p.dir, "build"), "cache")
+    let mut cmd: string = c.p.lepm + " bootstrap --root " + ft::sys::sq(c.rootfs) + " --release " + ft::sys::sq(c.p.base_release)
+    cmd = cmd + " --arch " + ft::sys::sq(c.p.arch) + " --cache " + ft::sys::sq(cache)
+    cmd = cmd + " --repos " + ft::sys::sq(ft::text::path_join(c.p.dir, c.p.repos))
+    cmd = cmd + " --policy " + ft::sys::sq(ft::text::path_join(c.p.dir, c.p.compat))
+    let lists: [string] = proj::package_lists(c.p)
+    let mut i: int = 0
+    while i < lists.len() is
+        cmd = cmd + " --list " + ft::sys::sq(ft::text::path_join(ft::text::path_join(c.p.dir, "package-list"), lists[i]))
+        i += 1
+    end
+    if c.dry is cmd = cmd + " --dry-run" end
+    return sh(c, cmd)
+end
+
+;; Instalacja zenitd: pobranie skryptu install.sh (adres z config.hk) i uruchomienie z DESTDIR.
+;; Skrypt liczy HERE=<katalog skryptu>/.. i oczekuje data/ oraz (bez --no-build) źródeł Z#,
+;; więc klonujemy repo, a pobrany skrypt kładziemy w jego scripts/.
+pub fn step_zenitd(c: Ctx) -> string is
+    let repo: string = ft::text::path_join(c.work, "zenitd")
+    let mut e: string = sh(c, "git clone --depth 1 " + ft::sys::sq(c.p.zenitd_repo) + " " + ft::sys::sq(repo))
+    if e != "" is return e end
+    e = sh(c, "curl -fsSL " + ft::sys::sq(c.p.zenitd_script) + " -o " + ft::sys::sq(ft::text::path_join(repo, "scripts/install.sh")))
+    if e != "" is return e end
+    let mut flags: string = ""
+    let prebuilt: string = ft::sys::getenv_or("ZENITD_BIN", "")
+    if prebuilt != "" is
+        e = sh(c, "install -D -m 0755 " + ft::sys::sq(prebuilt) + " " + ft::sys::sq(ft::text::path_join(repo, "target/release/zenitd")))
+        if e != "" is return e end
+        flags = " --no-build"
+    else is
+        if !c.dry && !ft::sys::have_tool("z#") is
+            return "brak kompilatora z# na hoście; podaj gotową binarkę: ZENITD_BIN=/ścieżka/zenitd (zob. docs/BUILDING.md)"
+        end
+    end
+    e = sh(c, "DESTDIR=" + ft::sys::sq(c.rootfs) + " PREFIX=/usr bash " + ft::sys::sq(ft::text::path_join(repo, "scripts/install.sh")) + flags)
+    if e != "" is return e end
+    if !c.dry && fs::exists(ft::text::path_join(c.rootfs, "usr/lib/systemd/systemd")) is
+        ui::warn("w obrazie jest binarka systemd mimo [exclude] w compat.hk — sprawdź politykę (PID 1 ma być zenitd)")
+    end
+    return ""
+end
+
+pub fn step_overlay(c: Ctx) -> string is
+    let files: string = ft::text::path_join(c.p.dir, "files")
+    if !c.dry && !fs::is_dir(files) is return "brak katalogu files/" end
+    let mut e: string = sh(c, "cp -a " + ft::sys::sq(files) + "/. " + ft::sys::sq(c.rootfs) + "/")
+    if e != "" is return e end
+    let br: string = ft::text::path_join(c.p.dir, "branding")
+    let dst: string = ft::text::path_join(c.rootfs, "usr/share/legendaryos/branding")
+    e = sh(c, "mkdir -p " + ft::sys::sq(dst) + " && cp -a " + ft::sys::sq(br) + "/. " + ft::sys::sq(dst) + "/")
+    if e != "" is return e end
+    ;; repos.hk i compat.hk jadą w obrazie: lpm (na urządzeniu) liczy zależności tą samą polityką co lepm przy budowie
+    let share: string = ft::text::path_join(c.rootfs, "usr/share/legendaryos")
+    e = sh(c, "mkdir -p " + ft::sys::sq(share) + " && cp -f " + ft::sys::sq(ft::text::path_join(c.p.dir, c.p.repos)) + " " + ft::sys::sq(ft::text::path_join(share, "repos.hk")) + " && cp -f " + ft::sys::sq(ft::text::path_join(c.p.dir, c.p.compat)) + " " + ft::sys::sq(ft::text::path_join(share, "compat.hk")))
+    return e
+end
+
+;; lpm w obrazie: gotowa binarka z LPM_BIN (zbudowana `bit build` w ../lpm). Bez niej obraz nie ma menedżera pakietów.
+pub fn step_lpm(c: Ctx) -> string is
+    let bin: string = ft::sys::getenv_or("LPM_BIN", "")
+    if bin == "" is
+        if c.strict is return "brak LPM_BIN (--strict): podaj ścieżkę do binarki lpm" end
+        ui::warn("LPM_BIN nie ustawiony — obraz powstanie BEZ lpm (ustaw LPM_BIN=/ścieżka/lpm)")
+        return ""
+    end
+    return sh(c, "install -D -m 0755 " + ft::sys::sq(bin) + " " + ft::sys::sq(ft::text::path_join(c.rootfs, "usr/bin/lpm")))
+end
+
+;; Skrypty z scripts/ (kolejność alfabetyczna): *.sh w chroocie; *.hl przez `hl` (w obrazie albo na hoście).
+pub fn step_hooks(c: Ctx) -> string is
+    let dir: string = ft::text::path_join(c.p.dir, "scripts")
+    if !fs::is_dir(dir) is return "" end
+    let files: [string] = proj::sort(fs::list_dir(dir))
+    let mut i: int = 0
+    while i < files.len() is
+        let f: string = files[i]
+        i += 1
+        let src: string = ft::text::path_join(dir, f)
+        if ft::text::ends_with(f, ".sh") is
+            ui::info("hook " + f)
+            let tmp: string = ft::text::path_join(c.rootfs, "tmp/legendary-hook-" + f)
+            let mut e: string = sh(c, "install -D -m 0755 " + ft::sys::sq(src) + " " + ft::sys::sq(tmp))
+            if e != "" is return e end
+            e = sh(c, "chroot " + ft::sys::sq(c.rootfs) + " /bin/sh /tmp/legendary-hook-" + f)
+            if e != "" is return "hook " + f + ": " + e end
+            let rm: string = sh(c, "rm -f " + ft::sys::sq(tmp))
+        else is
+            if ft::text::ends_with(f, ".hl") is
+                if fs::size(src) == 0 && !c.dry is
+                    ui::info("hook " + f + " pusty — pominięty")
+                else is
+                    if ft::sys::have_tool("hl") is
+                        ui::info("hook " + f + " (hl)")
+                        let e2: string = sh(c, "LEGENDARY_ROOTFS=" + ft::sys::sq(c.rootfs) + " hl " + ft::sys::sq(src))
+                        if e2 != "" is return "hook " + f + ": " + e2 end
+                    else is
+                        if c.strict is return "hook " + f + ": brak `hl` na hoście (--strict)" end
+                        ui::warn("hook " + f + " pominięty: brak `hl` na hoście")
+                    end
+                end
+            end
+        end
+    end
+    return ""
+end
+
+;; Zamiana układu Fedory na LegendaryOS: usr->system, etc/var/root/srv->state, nowe korzenie, symlinki zgodności.
+pub fn step_layout(c: Ctx) -> string is
+    let r: string = c.rootfs
+    let mut cmds: [string] = []
+    cmds.push("cd " + ft::sys::sq(r) + " && rm -f bin sbin lib lib64")
+    cmds.push("cd " + ft::sys::sq(r) + " && mv usr system")
+    cmds.push("cd " + ft::sys::sq(r) + " && mkdir -p state && mv etc state/etc && mv var state/var")
+    cmds.push("cd " + ft::sys::sq(r) + " && for d in root srv; do [ -e $d ] && [ ! -L $d ] && mv $d state/$d; done; true")
+    let mut i: int = 0
+    while i < cmds.len() is
+        let e: string = sh(c, cmds[i])
+        if e != "" is return e end
+        i += 1
+    end
+    if c.dry is
+        write("    # ft::api::layout_ensure + layout_apply_compat w " + r)
+        return ""
+    end
+    let le: string = ft::api::layout_ensure(r)
+    if le != "" is return le end
+    let made: [string] = ft::api::layout_apply_compat(r)
+    ui::info("układ: /system /state /packages /tools /home + " + ft::text::istr(made.len()) + " symlinków zgodności")
+    return ""
+end
+
+pub fn now_iso() -> string is
+    let r: sys::Exec = ft::sys::exec("date -u +%Y-%m-%dT%H:%M:%SZ")
+    return ft::text::trim(r.out)
+end
+
+pub fn manifest_fields(c: Ctx) -> [string] is
+    return ["name=" + c.p.name, "version=" + c.p.version, "base=fedora", "base_release=" + c.p.base_release,
+        "arch=" + c.p.arch, "channel=" + c.p.channel, "tag=" + c.tag, "generation=1", "kind=base",
+        "created=" + now_iso(), "desktop.environment=" + c.p.desktop, "desktop.display_manager=" + c.p.dm,
+        "deployment.base=" + c.tag]
+end
+
+;; os-release, issue, hostname i manifest.toml (po zamianie układu: etc -> state/etc).
+pub fn step_identity(c: Ctx) -> string is
+    let p: proj::Project = c.p
+    let q: string = __builtin_char_code_to_str(34)
+    let osr: string = "NAME=" + q + p.name + q + "\nID=" + p.id + "\nID_LIKE=fedora\nVERSION=" + q + p.version + q + "\nVERSION_ID=" + p.version + "\nPRETTY_NAME=" + q + p.name + " " + p.version + q + "\nVARIANT_ID=" + p.channel + "\nHOME_URL=" + q + "https://github.com/LegendaryOS" + q + "\n"
+    let etc: string = ft::text::path_join(c.rootfs, "state/etc")
+    if c.dry is
+        write("    # zapis state/etc/os-release, issue, hostname oraz manifest.toml (ft::api::os_manifest_write)")
+        return ""
+    end
+    if !fs::write(ft::text::path_join(etc, "os-release"), osr) is return "nie można zapisać os-release" end
+    let w1: bool = fs::write(ft::text::path_join(etc, "hostname"), p.id + "\n")
+    let w2: bool = fs::write(ft::text::path_join(etc, "issue"), p.name + " " + p.version + " \\l\n")
+    ;; zapis + walidacja (m.in. init.service_manager == zenitd) robi biblioteka
+    return ft::api::os_manifest_write(ft::text::path_join(c.rootfs, "manifest.toml"), manifest_fields(c))
+end
+
+;; Narzędzia HackerOS/Zenit: katalog tools.hk -> /tools/<nazwa>/*.sqfs w obrazie.
+pub fn step_tools(c: Ctx) -> string is
+    let cat: string = ft::text::path_join(c.p.dir, c.p.tools_catalog)
+    if !fs::exists(cat) is
+        ui::info("brak katalogu narzędzi (" + c.p.tools_catalog + ") — pominięto /tools")
+        return ""
+    end
+    let ce: string = ft::api::hk_check(cat)
+    if ce != "" is return "tools.hk: " + ce end
+    let ks: [string] = ft::api::hk_keys(cat, "tools")
+    let mut fails: int = 0
+    let mut i: int = 0
+    while i < ks.len() is
+        if ft::text::ends_with(ks[i], ".git") is
+            let name: string = ks[i][0..ks[i].len() - 4]
+            let git: string = ft::api::hk_get(cat, "tools", name + ".git", "")
+            if c.dry is
+                write("    # ft::api::tool_pack " + name + " <- " + git)
+            else is
+                let t: [string] = ft::api::tool_pack(c.rootfs, name, git, ft::api::hk_get(cat, "tools", name + ".rev", ""),
+                    ft::api::hk_get(cat, "tools", name + ".entry", ""), ft::api::hk_get(cat, "tools", name + ".build", ""))
+                if t[0] != "" is
+                    fails += 1
+                    if c.strict is return "narzędzie " + name + ": " + t[0] end
+                    ui::warn("narzędzie " + name + " pominięte: " + t[0])
+                else is
+                    ui::ok("/tools/" + name + " @ " + t[1][0..12] + " (" + ft::text::istr(ft::text::parse_int(t[2], 0) / 1024) + " KiB)")
+                end
+            end
+        end
+        i += 1
+    end
+    if fails > 0 is ui::warn("narzędzi pominiętych: " + ft::text::istr(fails)) end
+    return ""
+end
+
+;; Snapshot FastTree całego rootfs + rejestracja wdrożenia bazowego.
+pub fn step_fasttree(c: Ctx) -> string is
+    let ftroot: string = ft::text::path_join(c.out, "fasttree")
+    if c.dry is
+        write("    # ft::api::snapshot " + ftroot + " <- " + c.rootfs + " tag=" + c.tag)
+        write("    # ft::api::register_base " + c.tag)
+        return ""
+    end
+    ;; biblioteka libfasttree — zamiast `fasttree snapshot` (CLI)
+    let e: string = ft::api::snapshot(ftroot, c.rootfs, c.tag)
+    if e != "" is return e end
+    ui::ok("snapshot FastTree: " + ft::text::istr(ft::api::manifest_entries(ftroot, c.tag)) + " wpisów")
+    ;; rekord wdrożenia bazowego zapisuje się do <out>/state/deployments
+    return ft::api::register_base(c.out, c.tag, ft::text::path_join(c.rootfs, "manifest.toml"), now_iso())
+end
+
+pub fn step_oci(c: Ctx) -> string is
+    if !c.dry && !ft::sys::have_tool("podman") is return "brak podmana (potrzebny do obrazu OCI)" end
+    let ref: string = proj::lower(c.p.registry + "/" + c.p.org + "/" + c.p.oci_name) + ":" + c.p.version
+    let archive: string = ft::text::path_join(c.out, c.p.id + "-" + c.p.version + "-" + c.p.arch + ".oci.tar")
+    let init: string = "/system/lib/zenit/zenitd"
+    let mut e: string = sh(c, "tar --numeric-owner --xattrs -C " + ft::sys::sq(c.rootfs) + " -cf - . | podman import --change " + ft::sys::sq("CMD [" + __builtin_char_code_to_str(34) + init + __builtin_char_code_to_str(34) + "]") + " --change " + ft::sys::sq("LABEL org.opencontainers.image.title=" + c.p.name) + " - " + ft::sys::sq(ref))
+    if e != "" is return e end
+    e = sh(c, "podman save --format oci-archive -o " + ft::sys::sq(archive) + " " + ft::sys::sq(ref))
+    return e
+end
+
+fn grub_cfg(c: Ctx) -> string is
+    let lb: string = ft::text::lbrace()
+    let rb: string = ft::text::rbrace()
+    let label: string = c.p.id + "-" + c.p.version
+    let args: string = "root=live:CDLABEL=" + label + " rd.live.image init=/sbin/init " + c.p.kernel_args
+    return "set default=0\nset timeout=5\nmenuentry '" + c.p.name + " " + c.p.version + " (live)' " + lb + "\n  linux /boot/vmlinuz " + args + "\n  initrd /boot/initramfs.img\n" + rb + "\nmenuentry '" + c.p.name + " (tryb awaryjny)' " + lb + "\n  linux /boot/vmlinuz " + args + " zenit.unit=rescue\n  initrd /boot/initramfs.img\n" + rb + "\n"
+end
+
+;; ISO live: squashfs rootfs w LiveOS/ + kernel/initramfs + GRUB (grub2-mkrescue: BIOS + UEFI).
+pub fn step_iso(c: Ctx) -> string is
+    let iso: string = ft::text::path_join(c.work, "iso")
+    let label: string = c.p.id + "-" + c.p.version
+    let out: string = ft::text::path_join(c.out, label + "-" + c.p.arch + ".iso")
+    let mut e: string = sh(c, "mkdir -p " + ft::sys::sq(iso) + "/LiveOS " + ft::sys::sq(iso) + "/boot/grub")
+    if e != "" is return e end
+    e = sh(c, "mksquashfs " + ft::sys::sq(c.rootfs) + " " + ft::sys::sq(iso) + "/LiveOS/squashfs.img -noappend -comp zstd -Xcompression-level 15 -quiet")
+    if e != "" is return e end
+    ;; kernel i initramfs z obrazu (po zamianie układu: system/lib/modules/<ver>/vmlinuz)
+    e = sh(c, "k=$(ls " + ft::sys::sq(c.rootfs) + "/system/lib/modules | sort -V | tail -1) && cp " + ft::sys::sq(c.rootfs) + "/system/lib/modules/$k/vmlinuz " + ft::sys::sq(iso) + "/boot/vmlinuz && if [ -f " + ft::sys::sq(c.rootfs) + "/system/lib/modules/$k/initramfs.img ]; then cp " + ft::sys::sq(c.rootfs) + "/system/lib/modules/$k/initramfs.img " + ft::sys::sq(iso) + "/boot/initramfs.img; else chroot " + ft::sys::sq(c.rootfs) + " dracut --no-hostonly --add 'dmsquash-live' -f /tmp/initramfs.img $k && cp " + ft::sys::sq(c.rootfs) + "/tmp/initramfs.img " + ft::sys::sq(iso) + "/boot/initramfs.img; fi")
+    if e != "" is return e end
+    if !c.dry is
+        if !fs::write(ft::text::path_join(iso, "boot/grub/grub.cfg"), grub_cfg(c)) is return "nie można zapisać grub.cfg" end
+    else is
+        write("    # zapis boot/grub/grub.cfg")
+    end
+    e = sh(c, "grub2-mkrescue -o " + ft::sys::sq(out) + " " + ft::sys::sq(iso) + " -volid " + ft::sys::sq(label))
+    return e
+end
+
+pub fn step_checksums(c: Ctx) -> string is
+    return sh(c, "cd " + ft::sys::sq(c.out) + " && for f in *.iso *.oci.tar; do [ -f \"$f\" ] && sha256sum \"$f\" > \"$f.sha256\"; done; true")
+end
+
+;; Lista kroków dla `plan` i `build`.
+pub fn step_names(p: proj::Project) -> [string] is
+    let mut s: [string] = ["prepare", "packages", "zenitd", "lpm", "overlay", "hooks", "layout", "identity", "tools", "fasttree"]
+    let mut i: int = 0
+    while i < p.formats.len() is
+        s.push(p.formats[i])
+        i += 1
+    end
+    s.push("checksums")
+    return s
+end
+
+pub fn run_step(c: Ctx, name: string) -> string is
+    if name == "prepare" is return step_prepare(c) end
+    if name == "packages" is return step_packages(c) end
+    if name == "zenitd" is return step_zenitd(c) end
+    if name == "lpm" is return step_lpm(c) end
+    if name == "overlay" is return step_overlay(c) end
+    if name == "hooks" is return step_hooks(c) end
+    if name == "layout" is return step_layout(c) end
+    if name == "identity" is return step_identity(c) end
+    if name == "tools" is return step_tools(c) end
+    if name == "fasttree" is return step_fasttree(c) end
+    if name == "oci" is return step_oci(c) end
+    if name == "iso" is return step_iso(c) end
+    if name == "checksums" is return step_checksums(c) end
+    return "nieznany krok: " + name
+end
+
+;; Cały pipeline. `only` ("" = wszystkie) ogranicza do jednego kroku.
+pub fn run(c: Ctx, only: string) -> int is
+    let names: [string] = step_names(c.p)
+    let mut i: int = 0
+    while i < names.len() is
+        let n: string = names[i]
+        i += 1
+        if only == "" || only == n is
+            ui::step(i, names.len(), n)
+            let e: string = run_step(c, n)
+            if e != "" is
+                ui::err("krok '" + n + "': " + e)
+                return 1
+            end
+        end
+    end
+    ui::ok("gotowe: " + c.out)
+    return 0
+end
