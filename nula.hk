@@ -1,6 +1,6 @@
 [package]
 -> name        => legendaryos-builder
--> version     => 0.1.0
+-> version     => 0.2.0
 -> description => Builder obrazów ISO i OCI dla LegendaryOS (Fedora + zenitd + FastTree, układ /system /state /packages /tools)
 -> authors     => ["LegendaryOS Team"]
 -> license     => MIT
@@ -12,12 +12,11 @@
 -> edition   => 2026
 -> toolchain => 0.9
 
+! nula wykrywa biblioteki w kodzie (use "bit -> libfasttree" w src/main.h#). Od 0.2.0 NIE MA [vendor] ani
+! scripts/vendor-fasttree.sh: libfasttree jest używany jako biblioteka (fasada ft::api::*), bez kopii źródeł
+! i bez wołania programu `fasttree`. Pakiety do rootfs składa osobne narzędzie `lepm` (../lepm), nie dnf.
 [pins]
 -> libfasttree => path ../libfasttree
-
-! H# 0.9 nie obsługuje pól struktur z typami z aliasu biblioteki — patrz docs/Z-SHARP-GAPS.md (N2).
-[vendor]
--> libfasttree => src
 
 [layout]
 -> src         => src
@@ -34,6 +33,6 @@
 -> plan
 --> run => bit run -- plan ../LegendaryOS
 --> description => Pokaż kroki budowy (dry-run)
--> vendor
---> run => scripts/vendor-fasttree.sh
---> description => Zsynchronizuj moduły libfasttree
+-> bootstrap-plan
+--> run => bit run -- build ../LegendaryOS --only packages --dry-run
+--> description => Pokaż polecenie lepm bootstrap (bez wykonywania)
