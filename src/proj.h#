@@ -16,8 +16,12 @@ pub struct Project is
     pub compat:         string   ;; compat.hk (atrapy systemd, wykluczenia, hooki)
     pub zenitd_repo:    string
     pub zenitd_script:  string
-    pub desktop:        string
-    pub dm:             string
+    pub editions:       [string]   ;; id edycji z config.hk [editions] list
+    pub default_edition: string
+    pub common_lists:   [string]   ;; listy pakietów wspólne dla wszystkich edycji (package-list/<nazwa>.list)
+    pub zsharp_script:  string     ;; adres install.hlpp (Z#), "" = pomiń
+    pub zsharp_required: bool
+    pub tools_image:    string
     pub formats:        [string]
     pub oci_name:       string
     pub org:            string
@@ -38,7 +42,7 @@ end
 
 fn empty_project(dir: string) -> Project is
     return Project { dir: dir, name: "", id: "", version: "", arch: "", channel: "", base_release: "", lepm: "lepm", repos: "repos.hk", compat: "compat.hk",
-        zenitd_repo: "", zenitd_script: "", desktop: "", dm: "", formats: [], oci_name: "", org: "", registry: "",
+        zenitd_repo: "", zenitd_script: "", editions: [], default_edition: "", common_lists: [], zsharp_script: "", zsharp_required: false, tools_image: "tools.sqfs", formats: [], oci_name: "", org: "", registry: "",
         token: "", tools_catalog: "", kernel_args: "" }
 end
 
@@ -60,6 +64,12 @@ pub fn abs_dir(dir: string) -> string is
     let t: string = ft::text::trim(r.out)
     if r.code != 0 || t == "" is return dir end
     return t
+end
+
+fn common_lists_of(cp: string) -> [string] is
+    let l: [string] = ft::api::hk_list(cp, "packages", "common_lists")
+    if l.len() == 0 is return ["base", "hardware", "legendary"] end
+    return l
 end
 
 pub fn load(dir0: string) -> LoadResult is
@@ -91,14 +101,18 @@ pub fn load(dir0: string) -> LoadResult is
         compat: ft::api::hk_get(cp, "packages", "policy", "compat.hk"),
         zenitd_repo: ft::api::hk_get(cp, "init", "zenitd_repo", "https://github.com/Zenit-Linux/zenitd"),
         zenitd_script: ft::api::hk_get(cp, "init", "zenitd_install_script", "https://raw.githubusercontent.com/Zenit-Linux/zenitd/main/scripts/install.sh"),
-        desktop: ft::api::hk_get(cp, "desktop", "environment", "blue-environment"),
-        dm: ft::api::hk_get(cp, "desktop", "display_manager", "sddm"),
+        editions: ft::api::hk_list(cp, "editions", "list"),
+        default_edition: ft::api::hk_get(cp, "editions", "default", ""),
+        common_lists: common_lists_of(cp),
+        zsharp_script: ft::api::hk_get(cp, "zsharp", "script", ""),
+        zsharp_required: ft::api::hk_get(cp, "zsharp", "required", "false") == "true",
+        tools_image: ft::api::hk_get(cp, "tools", "image", "tools.sqfs"),
         formats: formats,
         oci_name: ft::api::hk_get(cp, "image", "oci_name", "legendaryos"),
         org: org,
         registry: ft::api::hk_get(up, "user", "registry", "ghcr.io"),
         token: resolve_secret(ft::api::hk_get(up, "user", "token", "")),
-        tools_catalog: ft::api::hk_get(cp, "tools", "catalog", "files/usr/share/legendaryos/tools.hk"),
+        tools_catalog: ft::api::hk_get(cp, "tools", "catalog", "tools.hk"),
         kernel_args: ft::api::hk_get(cp, "boot", "kernel_args", "quiet rhgb") }
     return LoadResult { ok: true, project: p }
 end
@@ -117,7 +131,6 @@ pub fn validate(p: Project) -> [string] is
     if p.arch != "x86_64" && p.arch != "aarch64" is out.push("distro.arch musi być x86_64 albo aarch64") end
     if p.channel != "rolling" && p.channel != "stable" is out.push("distro.channel: rolling | stable") end
     if ft::text::parse_int(p.base_release, 0) < 40 is out.push("base.release musi być numerem Fedory >= 40") end
-    if p.dm != "sddm" && p.dm != "hdm" is out.push("desktop.display_manager: sddm (dziś) | hdm (plan)") end
     let mut f: int = 0
     while f < p.formats.len() is
         if p.formats[f] != "iso" && p.formats[f] != "oci" is out.push("targets.formats: nieznany format '" + p.formats[f] + "'") end
@@ -142,9 +155,39 @@ pub fn validate(p: Project) -> [string] is
         if !fs::is_dir(ft::text::path_join(p.dir, dirs[d])) is out.push("brak katalogu " + dirs[d] + "/") end
         d += 1
     end
-    if fs::is_dir(ft::text::path_join(p.dir, "package-list")) is
-        let lists: [string] = package_lists(p)
-        if lists.len() == 0 is out.push("package-list/ nie zawiera żadnego pliku *.list") end
+    if p.editions.len() == 0 is out.push("config.hk: [editions] list => [...] jest puste") end
+    if p.default_edition != "" && !has(p.editions, p.default_edition) is out.push("editions.default '" + p.default_edition + "' nie ma na liście edycji") end
+    let mut ci: int = 0
+    while ci < p.common_lists.len() is
+        let cl: string = ft::text::path_join(ft::text::path_join(p.dir, "package-list"), p.common_lists[ci] + ".list")
+        if !fs::exists(cl) is out.push("packages.common_lists: brak package-list/" + p.common_lists[ci] + ".list") end
+        ci += 1
+    end
+    let cat: string = ft::text::path_join(p.dir, p.tools_catalog)
+    if !fs::exists(cat) is
+        out.push("tools.catalog: brak pliku " + p.tools_catalog)
+    else is
+        let cps: [string] = ft::api::tb_catalog_check(cat)
+        let mut cq: int = 0
+        while cq < cps.len() is
+            out.push(p.tools_catalog + ": " + cps[cq])
+            cq += 1
+        end
+    end
+    let mut ei: int = 0
+    while ei < p.editions.len() is
+        let er: LoadEdition = load_edition(p, p.editions[ei])
+        if !er.ok is
+            out.push("edycja " + p.editions[ei] + ": brak " + "editions/" + p.editions[ei] + "/edition.hk")
+        else is
+            let eps: [string] = validate_edition(p, er.edition)
+            let mut ek: int = 0
+            while ek < eps.len() is
+                out.push("edycja " + p.editions[ei] + ": " + eps[ek])
+                ek += 1
+            end
+        end
+        ei += 1
     end
     if p.org == "" is out.push("user.hk: [user] organization albo name") end
     let rp: string = ft::text::path_join(p.dir, p.repos)
@@ -159,20 +202,6 @@ pub fn validate(p: Project) -> [string] is
         if ce != "" is out.push(ce) end
     end
     return out
-end
-
-;; Pliki *.list w kolejności alfabetycznej.
-pub fn package_lists(p: Project) -> [string] is
-    let dir: string = ft::text::path_join(p.dir, "package-list")
-    let mut out: [string] = []
-    if !fs::is_dir(dir) is return out end
-    let files: [string] = fs::list_dir(dir)
-    let mut i: int = 0
-    while i < files.len() is
-        if ft::text::ends_with(files[i], ".list") is out.push(files[i]) end
-        i += 1
-    end
-    return sort(out)
 end
 
 pub fn sort(xs: [string]) -> [string] is
@@ -192,34 +221,6 @@ pub fn sort(xs: [string]) -> [string] is
     return a
 end
 
-;; Pakiety ze wszystkich list: jedna nazwa na linię, `#` komentarz, puste linie pomijane.
-pub fn packages(p: Project) -> [string] is
-    let mut out: [string] = []
-    let lists: [string] = package_lists(p)
-    let mut i: int = 0
-    while i < lists.len() is
-        let ls: [string] = ft::text::lines(fs::read(ft::text::path_join(ft::text::path_join(p.dir, "package-list"), lists[i])))
-        let mut k: int = 0
-        while k < ls.len() is
-            let mut t: string = ft::text::trim(ls[k])
-            let h: int = ft::text::find(t, "#")
-            if h >= 0 is t = ft::text::trim(t[0..h]) end
-            k += 1
-            if t != "" is
-                let mut seen: bool = false
-                let mut j: int = 0
-                while j < out.len() is
-                    if out[j] == t is seen = true end
-                    j += 1
-                end
-                if !seen is out.push(t) end
-            end
-        end
-        i += 1
-    end
-    return out
-end
-
 ;; Poprawna nazwa pakietu (to samo kryterium co lrpm::pure::safe_name) — wczesna walidacja przed wywołaniem lepm.
 pub fn safe_pkg(s: string) -> bool is
     let n: int = s.len()
@@ -237,7 +238,7 @@ end
 pub fn with_formats(p: Project, f: [string]) -> Project is
     return Project { dir: p.dir, name: p.name, id: p.id, version: p.version, arch: p.arch, channel: p.channel,
         base_release: p.base_release, lepm: p.lepm, repos: p.repos, compat: p.compat, zenitd_repo: p.zenitd_repo, zenitd_script: p.zenitd_script,
-        desktop: p.desktop, dm: p.dm, formats: f, oci_name: p.oci_name, org: p.org, registry: p.registry,
+        editions: p.editions, default_edition: p.default_edition, common_lists: p.common_lists, zsharp_script: p.zsharp_script, zsharp_required: p.zsharp_required, tools_image: p.tools_image, formats: f, oci_name: p.oci_name, org: p.org, registry: p.registry,
         token: p.token, tools_catalog: p.tools_catalog, kernel_args: p.kernel_args }
 end
 
@@ -248,4 +249,240 @@ end
 pub fn lower(s: string) -> string is
     let r: sys::Exec = ft::sys::exec("printf %s " + ft::sys::sq(s) + " | tr 'A-Z' 'a-z'")
     return ft::text::trim(r.out)
+end
+
+pub fn has(xs: [string], v: string) -> bool is
+    let mut i: int = 0
+    while i < xs.len() is
+        if xs[i] == v is return true end
+        i += 1
+    end
+    return false
+end
+
+;; ── Edycje ───────────────────────────────────────────────────────────────────
+;; editions/<id>/edition.hk + package-list/*.list + files/ (nakładka) + scripts/ (hooki tylko tej edycji).
+
+pub struct Edition is
+    pub id:          string
+    pub name:        string
+    pub summary:     string
+    pub desktop:     string
+    pub dm:          string      ;; sddm | gdm | lightdm | cosmic-greeter | none
+    pub session:     string
+    pub installer:   string      ;; gui | tui | none
+    pub graphical:   bool
+    pub target:      string      ;; graphical | multi-user
+    pub iso_label:   string
+    pub lists:       [string]    ;; wspólne listy z package-list/ (np. graphical)
+    pub kernel_args: string
+    pub exclude:     [string]    ;; id narzędzi z tools.hk pomijane w tej edycji
+    pub dir:         string
+end
+
+pub struct LoadEdition is
+    pub ok:      bool
+    pub edition: Edition
+end
+
+pub fn edition_dir(p: Project, id: string) -> string is
+    return ft::text::path_join(ft::text::path_join(p.dir, "editions"), id)
+end
+
+pub fn load_edition(p: Project, id: string) -> LoadEdition is
+    let dir: string = edition_dir(p, id)
+    let f: string = ft::text::path_join(dir, "edition.hk")
+    let blank: Edition = Edition { id: id, name: "", summary: "", desktop: "", dm: "none", session: "", installer: "none", graphical: false,
+        target: "multi-user", iso_label: "", lists: [], kernel_args: p.kernel_args, exclude: [], dir: dir }
+    if !fs::exists(f) is return LoadEdition { ok: false, edition: blank } end
+    let ce: string = check_hk(f)
+    if ce != "" is return LoadEdition { ok: false, edition: blank } end
+    let g: string = ft::api::hk_get(f, "edition", "graphical", "false")
+    let e: Edition = Edition { id: ft::api::hk_get(f, "edition", "id", id),
+        name: ft::api::hk_get(f, "edition", "name", p.name + " " + id),
+        summary: ft::api::hk_get(f, "edition", "summary", ""),
+        desktop: ft::api::hk_get(f, "edition", "desktop", "none"),
+        dm: ft::api::hk_get(f, "edition", "display_manager", "none"),
+        session: ft::api::hk_get(f, "edition", "session", ""),
+        installer: ft::api::hk_get(f, "edition", "installer", "none"),
+        graphical: g == "true",
+        target: ft::api::hk_get(f, "edition", "default_target", "multi-user"),
+        iso_label: ft::api::hk_get(f, "edition", "iso_label", ""),
+        lists: ft::api::hk_list(f, "edition", "lists"),
+        kernel_args: ft::api::hk_get(f, "edition", "kernel_args", p.kernel_args),
+        exclude: ft::api::hk_list(f, "tools", "exclude"),
+        dir: dir }
+    return LoadEdition { ok: true, edition: e }
+end
+
+fn label_ok(s: string) -> bool is
+    if s.len() == 0 || s.len() > 32 is return false end
+    let mut i: int = 0
+    while i < s.len() is
+        let c: string = s[i..i + 1]
+        let ok: bool = (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c == "_"
+        if !ok is return false end
+        i += 1
+    end
+    return true
+end
+
+fn tabc() -> string is return __builtin_char_code_to_str(9) end
+
+;; Wiersze katalogu narzędzi dla edycji (TSV: id, as, kind, required, system, version, repo, title).
+pub fn edition_tools(p: Project, e: Edition) -> [string] is
+    return ft::api::tb_catalog_list(ft::text::path_join(p.dir, p.tools_catalog), e.id, e.exclude)
+end
+
+pub fn dm_known(dm: string) -> bool is
+    return dm == "sddm" || dm == "gdm" || dm == "lightdm" || dm == "cosmic-greeter" || dm == "none"
+end
+
+fn list_has_ext(dir: string, ext: string) -> bool is
+    if !fs::is_dir(dir) is return false end
+    let fl: [string] = fs::list_dir(dir)
+    let mut i: int = 0
+    while i < fl.len() is
+        if ft::text::ends_with(fl[i], ext) is return true end
+        i += 1
+    end
+    return false
+end
+
+;; Problemy edycji (puste = OK).
+pub fn validate_edition(p: Project, e: Edition) -> [string] is
+    let mut out: [string] = []
+    let t: string = tabc()
+    if e.name == "" is out.push("edition.name jest puste") end
+    if !dm_known(e.dm) is out.push("display_manager '" + e.dm + "': sddm | gdm | lightdm | cosmic-greeter | none") end
+    if e.installer != "gui" && e.installer != "tui" && e.installer != "none" is out.push("installer: gui | tui | none") end
+    if e.target != "graphical" && e.target != "multi-user" is out.push("default_target: graphical | multi-user") end
+    if !label_ok(e.iso_label) is out.push("iso_label '" + e.iso_label + "': 1–32 znaków A-Z 0-9 _") end
+    if e.graphical is
+        if e.dm == "none" is out.push("edycja graficzna musi mieć display_manager") end
+        if e.session == "" is out.push("edycja graficzna musi mieć session") end
+        if e.target != "graphical" is out.push("edycja graficzna: default_target => graphical") end
+        if e.installer == "tui" is out.push("edycja graficzna nie używa instalatora TUI") end
+    else is
+        if e.dm != "none" is out.push("edycja bez GUI nie może mieć display_manager") end
+        if e.target != "multi-user" is out.push("edycja bez GUI: default_target => multi-user") end
+        if e.installer == "gui" is out.push("edycja bez GUI nie używa instalatora GUI (tui)") end
+    end
+    let mut i: int = 0
+    while i < e.lists.len() is
+        let lp: string = ft::text::path_join(ft::text::path_join(p.dir, "package-list"), e.lists[i] + ".list")
+        if !fs::exists(lp) is out.push("lists: brak package-list/" + e.lists[i] + ".list") end
+        i += 1
+    end
+    if !list_has_ext(ft::text::path_join(e.dir, "package-list"), ".list") is
+        out.push("brak editions/" + e.id + "/package-list/*.list (pakiety edycji)")
+    end
+    if e.dm != "none" is
+        let unit: string = e.dm + ".service"
+        let own: string = ft::text::path_join(e.dir, "files/usr/lib/zenit/system/" + unit)
+        let common: string = ft::text::path_join(p.dir, "files/usr/lib/zenit/system/" + unit)
+        if !fs::exists(own) && !fs::exists(common) is out.push("brak jednostki " + unit + " (editions/" + e.id + "/files/usr/lib/zenit/system/)") end
+    end
+    let cat: string = ft::text::path_join(p.dir, p.tools_catalog)
+    if fs::exists(cat) && ft::api::tb_catalog_check(cat).len() == 0 is
+        let all: [string] = ft::api::tb_catalog_list(cat, e.id, [])
+        let mut ids: [string] = []
+        let mut k: int = 0
+        while k < all.len() is
+            ids.push(ft::text::split(all[k], t)[0])
+            k += 1
+        end
+        let mut x: int = 0
+        while x < e.exclude.len() is
+            if !has(ids, e.exclude[x]) is out.push("[tools] exclude: '" + e.exclude[x] + "' nie ma w katalogu dla tej edycji") end
+            if e.exclude[x] == "lpm" is out.push("[tools] exclude: lpm jest niezbędny (menedżer pakietów i montowanie /tools)") end
+            x += 1
+        end
+        let rows: [string] = ft::api::tb_catalog_list(cat, e.id, e.exclude)
+        let mut has_gui_inst: bool = false
+        let mut has_tui_inst: bool = false
+        let mut has_lpm: bool = false
+        let mut y: int = 0
+        while y < rows.len() is
+            let f: [string] = ft::text::split(rows[y], t)
+            y += 1
+            if f[2] == "installer" is has_gui_inst = true end
+            if ft::text::ends_with(f[0], "installer-tui") is has_tui_inst = true end
+            if f[0] == "lpm" is has_lpm = true end
+            if !e.graphical && (f[2] == "desktop" || f[2] == "session" || f[2] == "installer") is
+                out.push("edycja bez GUI dostałaby narzędzie graficzne: " + f[0] + " (zawęź editions w tools.hk)")
+            end
+        end
+        if !has_lpm is out.push("katalog narzędzi nie daje tej edycji lpm") end
+        if e.installer == "gui" && !has_gui_inst is out.push("installer => gui, ale katalog nie ma narzędzia kind=installer dla tej edycji") end
+        if e.installer == "tui" && !has_tui_inst is out.push("installer => tui, ale katalog nie ma *-installer-tui dla tej edycji") end
+        if e.id == "blue" && !has(ids, "blue-environment") is out.push("edycja blue wymaga narzędzia blue-environment w tools.hk") end
+    end
+    return out
+end
+
+;; Pliki *.list edycji w kolejności: wspólne (config.hk), listy wybrane w edition.hk, potem editions/<id>/package-list/*.list.
+pub fn package_files(p: Project, e: Edition) -> [string] is
+    let mut out: [string] = []
+    let pl: string = ft::text::path_join(p.dir, "package-list")
+    let mut i: int = 0
+    while i < p.common_lists.len() is
+        out.push(ft::text::path_join(pl, p.common_lists[i] + ".list"))
+        i += 1
+    end
+    let mut j: int = 0
+    while j < e.lists.len() is
+        let f: string = ft::text::path_join(pl, e.lists[j] + ".list")
+        if !has(out, f) is out.push(f) end
+        j += 1
+    end
+    let own: string = ft::text::path_join(e.dir, "package-list")
+    if fs::is_dir(own) is
+        let fl: [string] = sort(fs::list_dir(own))
+        let mut k: int = 0
+        while k < fl.len() is
+            if ft::text::ends_with(fl[k], ".list") is out.push(ft::text::path_join(own, fl[k])) end
+            k += 1
+        end
+    end
+    return out
+end
+
+;; Pakiety edycji: jedna nazwa na linię, `#` komentarz, bez duplikatów.
+pub fn packages(p: Project, e: Edition) -> [string] is
+    let mut out: [string] = []
+    let files: [string] = package_files(p, e)
+    let mut i: int = 0
+    while i < files.len() is
+        let ls: [string] = ft::text::lines(fs::read(files[i]))
+        let mut k: int = 0
+        while k < ls.len() is
+            let mut t: string = ft::text::trim(ls[k])
+            let h: int = ft::text::find(t, "#")
+            if h >= 0 is t = ft::text::trim(t[0..h]) end
+            k += 1
+            if t != "" && !has(out, t) is out.push(t) end
+        end
+        i += 1
+    end
+    return out
+end
+
+;; Wybór edycji z opcji --edition: "" => default, "all" => wszystkie, inaczej jedna (musi istnieć).
+pub fn select_editions(p: Project, want: string) -> [string] is
+    if want == "all" is return p.editions end
+    if want == "" is
+        if p.default_edition != "" is return [p.default_edition] end
+        if p.editions.len() > 0 is return [p.editions[0]] end
+        return []
+    end
+    let parts: [string] = ft::text::split(want, ",")
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < parts.len() is
+        let w: string = ft::text::trim(parts[i])
+        i += 1
+        if w != "" && has(p.editions, w) is out.push(w) end
+    end
+    return out
 end
