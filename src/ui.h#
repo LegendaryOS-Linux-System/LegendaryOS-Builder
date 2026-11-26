@@ -4,7 +4,7 @@ pub fn warn(msg: string) is write(colors::yellow("  !") + " " + msg) end
 pub fn step(n: int, total: int, msg: string) is
     write(colors::bold(colors::blue("[" + ft::text::istr(n) + "/" + ft::text::istr(total) + "]")) + " " + msg)
 end
-pub fn head(msg: string) is write(colors::bold(colors::magenta("lpm")) + " " + colors::bold(msg)) end
+pub fn head(msg: string) is write(colors::bold(colors::magenta("builder")) + " " + colors::bold(msg)) end
 
 pub fn err(msg: string) is
     ft::sys::eprint(colors::red(colors::bold("  ✗ błąd:")) + " " + msg)
