@@ -25,7 +25,7 @@
 [layout]
 ! niezmienne korzenie obrazu (patrz docs/PLAN.md)
 -> immutable => [/system, /packages, /tools]
--> mutable   => [/state, /home]
+-> mutable   => [/state, /home, /temp]
 
 [boot]
 -> kernel_args => quiet rhgb
