@@ -248,7 +248,7 @@ pub fn step_layout(c: Ctx) -> string is
     let le: string = ft::api::layout_ensure(r)
     if le != "" is return le end
     let made: [string] = ft::api::layout_apply_compat(r)
-    ui::info("układ: /system /state /packages /tools /home + " + ft::text::istr(made.len()) + " symlinków zgodności")
+    ui::info("układ: /system /state /packages /tools /home /temp + " + ft::text::istr(made.len()) + " symlinków zgodności")
     return ""
 end
 
