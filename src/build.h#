@@ -269,9 +269,9 @@ pub fn step_identity(c: Ctx) -> string is
         write("    # zapis state/etc/os-release, issue, hostname oraz manifest.toml (ft::api::os_manifest_write)")
         return ""
     end
-    if !fs::write(ft::text::path_join(etc, "os-release"), osr) is return "nie można zapisać os-release" end
-    let w1: bool = fs::write(ft::text::path_join(etc, "hostname"), p.id + "-" + c.ed.id + "\n")
-    let w2: bool = fs::write(ft::text::path_join(etc, "issue"), c.ed.name + " " + p.version + " \\l\n")
+    if !ft::sys::write_text(ft::text::path_join(etc, "os-release"), osr) is return "nie można zapisać os-release" end
+    let w1: bool = ft::sys::write_text(ft::text::path_join(etc, "hostname"), p.id + "-" + c.ed.id + "\n")
+    let w2: bool = ft::sys::write_text(ft::text::path_join(etc, "issue"), c.ed.name + " " + p.version + " \\l\n")
     ;; zapis + walidacja (m.in. init.service_manager == zenitd) robi biblioteka
     return ft::api::os_manifest_write(ft::text::path_join(c.rootfs, "manifest.toml"), manifest_fields(c))
 end
@@ -359,7 +359,7 @@ pub fn step_tools(c: Ctx) -> string is
     if se != "" is return se end
     ui::ok("stage /tools: " + ft::text::istr(good.len()) + " narzędzi")
     ;; rows do kroku toolbox (kopie "system") — zapis obok stage
-    let w: bool = fs::write(ft::text::path_join(c.work, "tools-rows.tsv"), ft::text::join(good, "\n") + "\n")
+    let w: bool = ft::sys::write_text(ft::text::path_join(c.work, "tools-rows.tsv"), ft::text::join(good, "\n") + "\n")
     return ""
 end
 
@@ -516,7 +516,7 @@ pub fn step_iso(c: Ctx) -> string is
     e = sh(c, "k=$(ls " + ft::sys::sq(c.rootfs) + "/system/lib/modules | sort -V | tail -1) && cp " + ft::sys::sq(c.rootfs) + "/system/lib/modules/$k/vmlinuz " + ft::sys::sq(iso) + "/boot/vmlinuz && if [ -f " + ft::sys::sq(c.rootfs) + "/system/lib/modules/$k/initramfs.img ]; then cp " + ft::sys::sq(c.rootfs) + "/system/lib/modules/$k/initramfs.img " + ft::sys::sq(iso) + "/boot/initramfs.img; else chroot " + ft::sys::sq(c.rootfs) + " dracut --no-hostonly --add 'dmsquash-live' -f /tmp/initramfs.img $k && cp " + ft::sys::sq(c.rootfs) + "/tmp/initramfs.img " + ft::sys::sq(iso) + "/boot/initramfs.img; fi")
     if e != "" is return e end
     if !c.dry is
-        if !fs::write(ft::text::path_join(iso, "boot/grub/grub.cfg"), grub_cfg(c)) is return "nie można zapisać grub.cfg" end
+        if !ft::sys::write_text(ft::text::path_join(iso, "boot/grub/grub.cfg"), grub_cfg(c)) is return "nie można zapisać grub.cfg" end
     else is
         write("    # zapis boot/grub/grub.cfg")
     end
@@ -529,7 +529,7 @@ pub fn step_checksums(c: Ctx) -> string is
     if e != "" is return e end
     if c.dry is return "" end
     let info: string = "! build-info.hk — metadane budowy (generowane)\n[build]\n-> distro => " + c.p.id + "\n-> edition => " + c.ed.id + "\n-> name => " + c.ed.name + "\n-> version => " + c.p.version + "\n-> arch => " + c.p.arch + "\n-> base_release => " + c.p.base_release + "\n-> created => " + now_iso() + "\n-> builder => legendaryos-builder " + version() + "\n"
-    if !fs::write(ft::text::path_join(c.out, "build-info.hk"), info) is return "nie można zapisać build-info.hk" end
+    if !ft::sys::write_text(ft::text::path_join(c.out, "build-info.hk"), info) is return "nie można zapisać build-info.hk" end
     return ""
 end
 
