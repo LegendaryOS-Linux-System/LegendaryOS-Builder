@@ -2,7 +2,7 @@
 
 Builder obrazów **ISO** (live) i **OCI** dla LegendaryOS. Zastępuje poprzednią wersję (nakładka na live-build/bootc —
 patrz `docs/legacy/`): teraz buduje dystrybucję opartą na **Fedorze**, z init-em **zenitd**, układem
-`/system /state /packages /tools` i obrazem systemu w **FastTree**. H# + biblioteki bit.io (`colors`, `nidus`,
+`/system /state /packages /tools /home /temp` (`/temp` = odpowiednik `/tmp`, symlink do `/state/var/tmp`) i obrazem systemu w **FastTree**. H# + biblioteki bit.io (`colors`, `nidus`,
 `progress-bar`) + **libfasttree jako biblioteka** (`use "bit -> libfasttree" from "ft"`; bez kopii źródeł, bez programu `fasttree`).
 Pakiety do rootfs składa **lepm** (satsolv) — builder **nie używa dnf**.
 
